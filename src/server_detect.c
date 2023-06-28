@@ -31,6 +31,10 @@ int detect_server(MYSQL *conn) {
   // debug the version
   g_message("Server version reported as: %s", db_version);
 
+  if (g_str_has_suffix(g_ascii_strdown(db_version), "mariadb")){ // Special case RDS MariaDB: 5.5.5-10.6.14-MariaDB
+    return SERVER_TYPE_MARIADB;
+  }
+
   re = pcre_compile(DETECT_TIDB_REGEX, 0, &error, &erroroffset, NULL);
   if (!re) {
     m_critical("Regular expression fail: %s", error);
