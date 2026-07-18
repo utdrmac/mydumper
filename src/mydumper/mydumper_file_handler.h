@@ -44,6 +44,8 @@ struct fifo{
 };
 
 void set_pipe_backup();
+gboolean is_pipe_backup();
+void set_compress_to_file();
 void initialize_file_handler();
 int m_open_pipe(char **filename, const char *type);
 void release_pid();

@@ -24,6 +24,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <zlib.h>
+#include <zstd.h>
 
 #include "myloader.h"
 #include "myloader_stream.h"
@@ -39,8 +42,6 @@ GHashTable *tbl_hash=NULL;
 guint refresh_table_list_interval=100;
 guint refresh_table_list_counter=1;
 gboolean skip_table_sorting = FALSE;
-gchar ** zstd_decompress_cmd = NULL; 
-gchar ** gzip_decompress_cmd = NULL;
 guint max_number_tables_to_sort_in_table_list = 100000;
 
 extern gboolean for_channel_incompatibility;
@@ -55,33 +56,174 @@ void initialize_common(){
   if ((exec_per_thread_extension!=NULL) && (exec_per_thread == NULL))
     m_critical("--exec-per-thread needs to be set when --exec-per-thread-extension (%s) is used", exec_per_thread_extension);
 
-  gchar *tmpcmd=NULL;
+  /* .gz and .zst are decompressed in-process via the linked zlib/libzstd (see
+     open_decompress_file), so no external gzip/zstd binary is required. Only a
+     custom --exec-per-thread command is resolved from PATH. */
   if (exec_per_thread!=NULL){
     exec_per_thread_cmd=g_strsplit(exec_per_thread, " ", 0);
-    tmpcmd=g_find_program_in_path(exec_per_thread_cmd[0]);
+    gchar *tmpcmd=g_find_program_in_path(exec_per_thread_cmd[0]);
     if (!tmpcmd)
       m_critical("%s was not found in PATH, use --exec-per-thread for non default locations",exec_per_thread_cmd[0]);
     exec_per_thread_cmd[0]=tmpcmd;
   }
+}
 
-  gchar *cmd=NULL;
-  tmpcmd=g_find_program_in_path(ZSTD);
-  if (!tmpcmd){
-    m_warning("%s was not found in PATH, use --exec-per-thread for non default locations",ZSTD);
-  }else{
-    zstd_decompress_cmd = g_strsplit(cmd=g_strdup_printf("%s -c -d", tmpcmd)," ",0);
-    g_free(tmpcmd);
-    g_free(cmd);
-  }
+/* ------------------------------------------------------------------ *
+ *  In-process decompression (gzip via zlib, zstd via libzstd)         *
+ *                                                                     *
+ *  On-disk .gz/.zst files are decompressed transparently through a    *
+ *  custom-stream FILE* (fopencookie on Linux, funopen on macOS) so    *
+ *  the existing read_data()/fread() readers work unchanged and no     *
+ *  external gzip/zstd process is forked.                              *
+ * ------------------------------------------------------------------ */
+#define DECOMP_GZIP 1
+#define DECOMP_ZSTD 2
+#define DECOMP_CHUNK 65536
 
-  tmpcmd=g_find_program_in_path(GZIP);
-  if (!tmpcmd){
-    m_warning("%s was not found in PATH, use --exec-per-thread for non default locations",GZIP);
-  }else{
-    gzip_decompress_cmd = g_strsplit( cmd=g_strdup_printf("%s -c -d", tmpcmd)," ",0);
-    g_free(tmpcmd);
-    g_free(cmd);
+struct decomp {
+  int fd;
+  guint8 codec;
+  z_stream *zs;          /* gzip (zlib) */
+  ZSTD_DStream *zds;     /* zstd */
+  guchar *inbuf;
+  ZSTD_inBuffer zin;     /* zstd input window into inbuf */
+  gboolean in_eof;
+  gboolean stream_end;
+};
+
+static ssize_t decomp_read_impl(void *cookie, char *buf, size_t size){
+  struct decomp *d = cookie;
+  if (size == 0 || d->stream_end)
+    return 0;
+  if (d->codec == DECOMP_ZSTD){
+    ZSTD_outBuffer out = {buf, size, 0};
+    while (out.pos < out.size && !d->stream_end){
+      if (d->zin.pos == d->zin.size && !d->in_eof){
+        ssize_t r = read(d->fd, d->inbuf, DECOMP_CHUNK);
+        if (r < 0)
+          return -1;
+        if (r == 0)
+          d->in_eof = TRUE;
+        d->zin.src = d->inbuf;
+        d->zin.size = (size_t)r;
+        d->zin.pos = 0;
+      }
+      size_t ret = ZSTD_decompressStream(d->zds, &out, &d->zin);
+      if (ZSTD_isError(ret))
+        return -1;
+      if (ret == 0 && d->in_eof && d->zin.pos == d->zin.size){
+        d->stream_end = TRUE;
+        break;
+      }
+      /* No more input available but frame not finished: stop to avoid spinning. */
+      if (d->in_eof && d->zin.pos == d->zin.size)
+        break;
+    }
+    return (ssize_t)out.pos;
   }
+  /* gzip / zlib */
+  d->zs->next_out = (Bytef *)buf;
+  d->zs->avail_out = (uInt)size;
+  while (d->zs->avail_out > 0 && !d->stream_end){
+    if (d->zs->avail_in == 0 && !d->in_eof){
+      ssize_t r = read(d->fd, d->inbuf, DECOMP_CHUNK);
+      if (r < 0)
+        return -1;
+      if (r == 0)
+        d->in_eof = TRUE;
+      d->zs->next_in = d->inbuf;
+      d->zs->avail_in = (uInt)r;
+    }
+    int ret = inflate(d->zs, Z_NO_FLUSH);
+    if (ret == Z_STREAM_END){
+      d->stream_end = TRUE;
+      break;
+    }
+    if (ret == Z_BUF_ERROR){
+      /* Needs more input/output; stop if the input is exhausted. */
+      if (d->in_eof && d->zs->avail_in == 0)
+        break;
+      continue;
+    }
+    if (ret != Z_OK)
+      return -1;
+  }
+  return (ssize_t)(size - d->zs->avail_out);
+}
+
+static int decomp_close_impl(void *cookie){
+  struct decomp *d = cookie;
+  if (d->zs){
+    inflateEnd(d->zs);
+    g_free(d->zs);
+  }
+  if (d->zds)
+    ZSTD_freeDStream(d->zds);
+  if (d->fd >= 0)
+    close(d->fd);
+  g_free(d->inbuf);
+  g_free(d);
+  return 0;
+}
+
+#ifdef __APPLE__
+static int decomp_readfn(void *c, char *buf, int n){
+  return (int)decomp_read_impl(c, buf, (size_t)n);
+}
+static int decomp_closefn(void *c){ return decomp_close_impl(c); }
+#else
+static ssize_t decomp_readfn(void *c, char *buf, size_t n){
+  return decomp_read_impl(c, buf, n);
+}
+static int decomp_closefn(void *c){ return decomp_close_impl(c); }
+#endif
+
+/* Returns DECOMP_GZIP/DECOMP_ZSTD for a built-in compressed extension, or 0.
+   A custom --exec-per-thread extension is never treated as built-in. */
+guint8 builtin_decompress_codec(const gchar *filename){
+  if (has_exec_per_thread_extension(filename))
+    return 0;
+  if (g_str_has_suffix(filename, ZSTD_EXTENSION))
+    return DECOMP_ZSTD;
+  if (g_str_has_suffix(filename, GZIP_EXTENSION))
+    return DECOMP_GZIP;
+  return 0;
+}
+
+/* Open an on-disk .gz/.zst file as a decompressing FILE*. Returns NULL on
+   error. The returned stream is read-only and sequential (sufficient for
+   read_data()/fread()). */
+FILE *open_decompress_file(const gchar *filename, guint8 codec){
+  int fd = open(filename, O_RDONLY);
+  if (fd < 0)
+    return NULL;
+  struct decomp *d = g_new0(struct decomp, 1);
+  d->fd = fd;
+  d->codec = codec;
+  d->inbuf = g_malloc(DECOMP_CHUNK);
+  if (codec == DECOMP_ZSTD){
+    d->zds = ZSTD_createDStream();
+    if (!d->zds || ZSTD_isError(ZSTD_initDStream(d->zds))){
+      decomp_close_impl(d);
+      return NULL;
+    }
+  }else{
+    d->zs = g_new0(z_stream, 1);
+    /* 15+32 auto-detects gzip and zlib wrappers. */
+    if (inflateInit2(d->zs, 15 + 32) != Z_OK){
+      decomp_close_impl(d);
+      return NULL;
+    }
+  }
+#ifdef __APPLE__
+  FILE *f = funopen(d, decomp_readfn, NULL, NULL, decomp_closefn);
+#else
+  cookie_io_functions_t io = { decomp_readfn, NULL, NULL, decomp_closefn };
+  FILE *f = fopencookie(d, "r", io);
+#endif
+  if (!f)
+    decomp_close_impl(d);
+  return f;
 }
 
 gboolean is_in_list(gchar *haystack, GList *list){
@@ -629,17 +771,14 @@ int execute_file_per_thread( const gchar *sql_fn, gchar *sql_fn3, gchar **exec){
   return childpid;
 }
 
+/* Only a custom --exec-per-thread extension routes through an external command
+   (a forked decompressor writing to a FIFO). Built-in .gz/.zst are decompressed
+   in-process (see open_decompress_file) and never reach this path. */
 gboolean get_command_and_basename(gchar *filename, gchar ***command, gchar **basename){
   int len=0;
   if (has_exec_per_thread_extension(filename)) {
     *command=exec_per_thread_cmd;
     len=strlen(exec_per_thread_extension);
-  }else if ( g_str_has_suffix(filename, ZSTD_EXTENSION) ){
-    *command=zstd_decompress_cmd;
-    len=strlen(ZSTD_EXTENSION);
-  }else if (g_str_has_suffix(filename, GZIP_EXTENSION)){
-    *command=gzip_decompress_cmd;
-    len=strlen(GZIP_EXTENSION);
   }else{
     goto avoid_command_check;
   }

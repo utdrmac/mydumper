@@ -82,7 +82,6 @@ guint max_threads_for_index_creation=4;
 guint max_threads_for_post_creation= 1;
 guint retry_count= 10;
 gboolean stream = FALSE;
-gboolean no_delete = FALSE;
 
 extern gboolean dry_run;
 extern gchar *server_version_arg;
@@ -153,11 +152,14 @@ void initialize_directories(){
         m_critical("a directory needs to be specified, see --help\n");
     }
   } else {
+    /* The diskless binary stream is consumed from stdin and reconstructed in
+       memory, so an input directory is pointless. */
+    if (stream)
+      m_critical("-d/--directory is incompatible with --stream: the backup is "
+                 "read from stdin, not from a directory. Remove -d/--directory "
+                 "(this also applies together with --compress).");
     directory=g_str_has_prefix(input_directory,"/")?input_directory:g_strdup_printf("%s/%s", current_dir, input_directory);
-    if (stream){
-      if (g_file_test(input_directory,G_FILE_TEST_IS_DIR) && !no_stream)
-          m_critical("Backup directory (-d) must not exist when --stream / --stream=TRADITIONAL");
-    }else{
+    {
       if (!g_file_test(input_directory,G_FILE_TEST_IS_DIR))
         m_critical("the specified directory doesn't exists\n");
       char *p = g_strdup_printf("%s/metadata", directory);
@@ -487,7 +489,7 @@ int main(int argc, char *argv[]) {
 
   initialize_restore();
 
-  if(stream && !no_stream)
+  if(stream)
     create_dir(directory);
   create_dir(fifo_directory);
   create_dir(load_data_tmp_directory);
@@ -668,7 +670,7 @@ int main(int argc, char *argv[]) {
   wait_schema_worker_to_finish(&conf);
   wait_worker_loader_main();
   enqueue_indexes_if_possible(&conf);
-  create_index_shutdown_job(&conf);
+  create_index_shutdown_job();
   wait_index_worker_to_finish();
   initialize_post_loding_threads(&conf);
   create_post_shutdown_job(&conf);
@@ -744,7 +746,7 @@ int main(int argc, char *argv[]) {
                       NULL);
   }
 
-  if (stream && no_delete == FALSE ){ //&& input_directory == NULL){
+  if (stream){ //&& input_directory == NULL){
 //    m_remove(directory,"metadata");
 //    m_remove(directory, "metadata.header");
     if (g_rmdir(directory) < 0) {

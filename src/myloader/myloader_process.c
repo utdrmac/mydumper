@@ -54,6 +54,40 @@ static GMutex *decompress_mutex = NULL;
 static guint active_decompressors = 0;
 static guint max_decompressors = 0;
 
+// Tracks memory-backed (fmemopen) streamed files so myl_close can free the
+// underlying buffer and release the stream memory budget.
+struct mem_open_entry { gchar *data; gsize len; };
+static GHashTable *mem_open_table = NULL;
+static GMutex *mem_open_mutex = NULL;
+
+static void mem_open_track(FILE *f, gchar *data, gsize len){
+  struct mem_open_entry *e = g_new0(struct mem_open_entry, 1);
+  e->data = data;
+  e->len = len;
+  g_mutex_lock(mem_open_mutex);
+  if (mem_open_table == NULL)
+    mem_open_table = g_hash_table_new(g_direct_hash, g_direct_equal);
+  g_hash_table_insert(mem_open_table, f, e);
+  g_mutex_unlock(mem_open_mutex);
+}
+
+static gboolean mem_open_untrack(FILE *f, gchar **data, gsize *len){
+  gboolean found = FALSE;
+  g_mutex_lock(mem_open_mutex);
+  if (mem_open_table != NULL){
+    struct mem_open_entry *e = g_hash_table_lookup(mem_open_table, f);
+    if (e){
+      *data = e->data;
+      *len = e->len;
+      g_hash_table_remove(mem_open_table, f);
+      g_free(e);
+      found = TRUE;
+    }
+  }
+  g_mutex_unlock(mem_open_mutex);
+  return found;
+}
+
 void initialize_process(struct configuration *c){
   partial_metadata_queue=g_async_queue_new();
   metadata_process_mutex = g_new0(GRecMutex, 1);
@@ -67,6 +101,8 @@ void initialize_process(struct configuration *c){
   _conf=c;
   fifo_hash=g_hash_table_new(g_direct_hash,g_direct_equal);
   fifo_table_mutex = g_mutex_new();
+
+  mem_open_mutex = g_mutex_new();
 
   // Initialize decompression throttle
   decompress_cond = g_cond_new();
@@ -94,6 +130,42 @@ FILE * myl_open(char *filename, const char *type){
   gchar **command=NULL;
   struct stat a;
   trace("myl_open %s", filename);
+
+  // Serve streamed files from memory instead of disk when available.
+  if (stream_mem_active() && type != NULL && type[0]=='r'){
+    gchar *base = g_path_get_basename(filename);
+    gchar *data = NULL;
+    gsize len = 0;
+    gboolean found = stream_mem_get(base, &data, &len);
+    g_free(base);
+    if (found){
+      file = fmemopen(data, len, "r");
+      if (file == NULL){
+        g_free(data);
+        stream_mem_release_bytes(len);
+        m_critical("fmemopen failed for streamed file %s", filename);
+        return NULL;
+      }
+      mem_open_track(file, data, len);
+      return file;
+    }
+  }
+
+  // On-disk .gz/.zst are decompressed in-process (no forked gzip/zstd).
+  if (type != NULL && type[0]=='r'){
+    guint8 codec = builtin_decompress_codec(filename);
+    if (codec){
+      file = open_decompress_file(filename, codec);
+      if (file == NULL){
+        g_critical("cannot open compressed file %s (%d)", filename, errno);
+        return NULL;
+      }
+      if (stream)
+        g_unlink(filename);
+      return file;
+    }
+  }
+
   if (get_command_and_basename(filename, &command, &basename)){
     // Acquire decompressor slot (throttle concurrent processes)
     g_mutex_lock(decompress_mutex);
@@ -135,7 +207,7 @@ FILE * myl_open(char *filename, const char *type){
       g_unlink(fifoname);
 //      m_remove0(fifo_directory,fifoname);
     }
-    if (stream && !no_delete)
+    if (stream)
       g_unlink(filename);
 /*    gchar *tmpbasename=g_path_get_basename(filename);
     m_remove(directory,tmpbasename);
@@ -169,7 +241,7 @@ FILE * myl_open(char *filename, const char *type){
       file=NULL;
     }else{
       file=g_fopen(filename, type);
-      if (stream && !no_delete)
+      if (stream)
         g_unlink(filename);
     }
   }
@@ -178,6 +250,18 @@ FILE * myl_open(char *filename, const char *type){
 
 void myl_close(const char *filename, FILE *file, gboolean rm){
   trace("myl_close %s", filename);
+
+  // Memory-backed streamed file: free the buffer and release the budget.
+  gchar *mem_data = NULL;
+  gsize mem_len = 0;
+  if (mem_open_untrack(file, &mem_data, &mem_len)){
+    fclose(file);
+    g_free(mem_data);
+    stream_mem_release_bytes(mem_len);
+    (void) rm;
+    return;
+  }
+
   g_mutex_lock(fifo_table_mutex);
   struct fifo *f=g_hash_table_lookup(fifo_hash,file);
   g_mutex_unlock(fifo_table_mutex);

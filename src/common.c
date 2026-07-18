@@ -613,7 +613,7 @@ gboolean m_remove0(gchar * directory, const gchar * filename){
 }
 
 gboolean m_remove(gchar * directory, const gchar * filename){
-  if (stream && no_delete == FALSE){
+  if (stream){
     return m_remove0(directory,filename);
   }
   return TRUE;
@@ -882,51 +882,27 @@ void print_version(const gchar *program){
     g_string_free(str, TRUE);
 }
 
-gboolean stream_arguments_callback(const gchar *option_name,const gchar *value, gpointer data, GError **error){
-  *error=NULL;
-  (void) data;
-  if (g_strstr_len(option_name,8,"--stream")){
+/* 
+ * --stream is a plain boolean: it always uses the mydumper<->myloader
+ * binary protocol over stdout/stdin. The old sub-values (TRADITIONAL,
+ * NO_STREAM, NO_DELETE, NO_STREAM_AND_NO_DELETE, UNPACK, LEGACY and the
+ * numeric bitmask) have been removed.
+ */
+gboolean stream_arguments_callback(const gchar *option_name, const gchar *value, gpointer data, GError **error){
+  *error = NULL;
+  (void) data; // unused
+  if (g_strstr_len(option_name,8,"--stream")) {
     stream = TRUE;
-    use_defer= FALSE;
+    use_defer = FALSE;
 
-    if (value==NULL || !g_ascii_strcasecmp(value,"TRADITIONAL") || !g_ascii_strcasecmp(value,"0")){
-      return TRUE;
-    }
-
-    guint64 val= strtol(value, NULL, 10);
-    if (errno == ERANGE || val > 7 ){
-      g_error("Value out of range on --stream");
+    if (value != NULL) {
+      g_set_error(error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+                  "--stream no longer accepts a value; it always uses "
+                  "the mydumper<->myloader binary protocol. Redirect stdout to "
+                  "save the backup to disk");
       return FALSE;
     }
-
-    if (!g_ascii_strcasecmp(value,"NO_DELETE")){
-      no_delete=TRUE;
-      return TRUE;
-    }
-    if (!g_ascii_strcasecmp(value,"NO_STREAM_AND_NO_DELETE")){
-      no_delete=TRUE;
-      no_stream=TRUE;
-      return TRUE;
-    }
-    if (!g_ascii_strcasecmp(value,"NO_STREAM")){
-      no_stream=TRUE;
-      return TRUE;
-    }
-    if (!g_ascii_strcasecmp(value,"UNPACK")){
-      no_delete=TRUE;
-      dry_run=TRUE; 
-      return TRUE;
-    }
-
-    if (!val){
-      return FALSE;
-    }
-
-    if ((val) & (1<<(2))) no_stream=TRUE;
-    if ((val) & (1<<(1))) no_delete=TRUE;
-    if ((val) & (1<<(0))) no_sync=TRUE;
     return TRUE;
-
   }
   return FALSE;
 }

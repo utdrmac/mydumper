@@ -54,7 +54,7 @@ void exec_this_command(gchar **c_arg,struct filename_queue_element * sqe){
     int wstatus;
     int waitchildpid=wait(&wstatus);
     // TODO: do we want to keep the file depending og the wstatus ??
-    if (no_delete == FALSE){
+    {
       _key=g_strdup_printf("%d",waitchildpid);
       g_mutex_lock(exec_mutex);
       struct filename_queue_element *sqe2=g_hash_table_lookup(pid_file_table, g_strdup(_key));

@@ -149,7 +149,7 @@ static GOptionEntry entries[] = {
     {"kill-at-once", 'k', 0, G_OPTION_ARG_NONE, &kill_at_once, 
       "When Ctrl+c is pressed it immediately terminates the process", NULL},
     {"mysqldump", 0, 0, G_OPTION_ARG_NONE, &mysqldump, 
-      "It expect a mysqldump format when stream is used", NULL},
+      "Expects mysqldump format when --stream is used", NULL},
     {NULL, 0, 0, G_OPTION_ARG_NONE, NULL, NULL, NULL}};
 
 static GOptionEntry load_from_metadata_entries[] = {
@@ -203,9 +203,9 @@ static GOptionEntry execution_entries[] = {
     {"retry-count", 0, 0, G_OPTION_ARG_INT, &retry_count,
       "Lock wait timeout exceeded retry count, default 10 (currently only for DROP TABLE)", NULL},
     {"stream", 0, G_OPTION_FLAG_OPTIONAL_ARG, G_OPTION_ARG_CALLBACK , &stream_arguments_callback,
-      "It will receive the stream from STDIN and create the file in the disk before start processing. "
-      "Accepts NO_STREAM, NO_DELETE, NO_STREAM_AND_NO_DELETE, UNPACK and TRADITIONAL "
-      "which is the default value and used if no parameter is given", NULL},
+      "Receive the backup from STDIN using the mydumper<->myloader binary "
+      "protocol (produced by 'mydumper --stream') and restore it. Takes no "
+      "value", NULL},
     {"metadata-refresh-interval", 0, 0, G_OPTION_ARG_INT, &refresh_table_list_interval, 
       "Every this amount of tables the internal metadata will be refreshed. "
       "If the amount of tables you have in your metadata file is high, then you should increase this value. Default: 100", NULL},

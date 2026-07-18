@@ -14,6 +14,19 @@ find_package(MySQL)
 find_package(ZLIB)
 find_package(GLIB2)
 find_package(PCRE2)
+
+# libzstd is required for in-process (diskless) zstd stream compression.
+find_package(PkgConfig)
+if (PKG_CONFIG_FOUND)
+  pkg_check_modules(ZSTD libzstd)
+endif ()
+if (NOT ZSTD_FOUND)
+  find_path(ZSTD_INCLUDE_DIRS zstd.h)
+  find_library(ZSTD_LIBRARIES NAMES zstd)
+endif ()
+if (NOT ZSTD_INCLUDE_DIRS OR NOT ZSTD_LIBRARIES)
+  message(FATAL_ERROR "libzstd is required but was not found. Install it (e.g. libzstd-dev / zstd) so that zstd.h and libzstd are available.")
+endif ()
 # find_package(JeMalloc)
 
 #if (NOT JEMALLOC_FOUND)
@@ -45,7 +58,16 @@ if (MARIADB_FOUND AND NOT MARIADB_SSL AND WITH_SSL)
 endif()
 
 set(CMAKE_C_FLAGS "-std=gnu99 -Wall -Wno-deprecated-declarations -Wunused -Wwrite-strings -Wno-strict-aliasing -Wextra -Wshadow -g -Werror ${MYSQL_CFLAGS}")
-include_directories(${MYDUMPER_SOURCE_DIR} ${MYSQL_INCLUDE_DIR} ${GLIB2_INCLUDE_DIR} ${PCRE2_INCLUDE_DIR} ${ZLIB_INCLUDE_DIRS} )
+
+# The MySQL client headers forward-declare ZSTD_CCtx/ZSTD_DCtx, which collide
+# with the identical typedefs in <zstd.h>. Under gnu99 Clang flags this as
+# -Wtypedef-redefinition (a harmless C11 feature); GCC accepts it. Silence it on
+# Clang so -Werror still catches everything else.
+if (CMAKE_C_COMPILER_ID MATCHES "Clang")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-typedef-redefinition")
+endif ()
+include_directories(${MYDUMPER_SOURCE_DIR} ${MYSQL_INCLUDE_DIR} ${GLIB2_INCLUDE_DIR} ${PCRE2_INCLUDE_DIR} ${ZLIB_INCLUDE_DIRS} ${ZSTD_INCLUDE_DIRS} )
+link_directories(${ZSTD_LIBRARY_DIRS})
 
 OPTION(WITH_ASAN "Build with ASAN" OFF)
 OPTION(WITH_TSAN "Build with TSAN" OFF)
@@ -79,7 +101,7 @@ endif (NOT CMAKE_INSTALL_PREFIX)
 MARK_AS_ADVANCED(CMAKE)
 
 CONFIGURE_FILE(${CMAKE_CURRENT_SOURCE_DIR}/config.h.in ${CMAKE_CURRENT_SOURCE_DIR}/src/config.h )
-SET( SHARED_SRCS src/server_detect.c src/connection.c src/logging.c src/set_verbose.c src/common.c src/tables_skiplist.c src/tables_includelist.c src/regex.c src/common_options.c src/pmm_thread.c src/checksum.c )
+SET( SHARED_SRCS src/server_detect.c src/connection.c src/logging.c src/set_verbose.c src/common.c src/common_stream_protocol.c src/tables_skiplist.c src/tables_includelist.c src/regex.c src/common_options.c src/pmm_thread.c src/checksum.c )
 SET( MYDUMPER_SRCS src/mydumper/mydumper.c ${SHARED_SRCS} src/mydumper/mydumper_pmm.c src/mydumper/mydumper_start_dump.c src/mydumper/mydumper_jobs.c src/mydumper/mydumper_common.c src/mydumper/mydumper_stream.c src/mydumper/mydumper_database.c src/mydumper/mydumper_table.c src/mydumper/mydumper_working_thread.c src/mydumper/mydumper_daemon_thread.c src/mydumper/mydumper_exec_command.c src/mydumper/mydumper_masquerade.c src/mydumper/mydumper_chunks.c src/mydumper/mydumper_write.c src/mydumper/mydumper_arguments.c src/mydumper/mydumper_integer_chunks.c src/mydumper/mydumper_string_chunks.c src/mydumper/mydumper_partition_chunks.c src/mydumper/mydumper_file_handler.c src/mydumper/mydumper_create_jobs.c )
 SET( MYLOADER_SRCS src/myloader/myloader.c ${SHARED_SRCS} src/myloader/myloader_pmm.c src/myloader/myloader_stream.c src/myloader/myloader_stream.c src/myloader/myloader_process.c src/myloader/myloader_common.c src/myloader/myloader_directory.c src/myloader/myloader_restore.c src/myloader/myloader_restore_job.c src/myloader/myloader_control_job.c src/myloader/myloader_process_filename.c src/myloader/myloader_process_file_type.c src/myloader/myloader_arguments.c src/myloader/myloader_worker_index.c src/myloader/myloader_worker_schema.c src/myloader/myloader_worker_loader.c src/myloader/myloader_worker_post.c src/myloader/myloader_database.c src/myloader/myloader_worker_loader_main.c src/myloader/myloader_table.c)
 
@@ -96,11 +118,11 @@ else ()
 endif ()
 
 if (NOT JEMALLOC_FOUND)
-  target_link_libraries(mydumper ${MYSQL_LIBRARIES} ${GLIB2_LIBRARIES} ${GTHREAD2_LIBRARIES} ${GIO2_LIBRARIES} ${GOBJECT2_LIBRARIES} ${PCRE2_LIBRARY} ${ZLIB_LIBRARIES} stdc++ m ${OPENSSL_LINK_LIBRARIES})
-  target_link_libraries(myloader ${MYSQL_LIBRARIES} ${GLIB2_LIBRARIES} ${GTHREAD2_LIBRARIES} ${PCRE2_LIBRARY} ${ZLIB_LIBRARIES} stdc++ ${OPENSSL_LINK_LIBRARIES})
+  target_link_libraries(mydumper ${MYSQL_LIBRARIES} ${GLIB2_LIBRARIES} ${GTHREAD2_LIBRARIES} ${GIO2_LIBRARIES} ${GOBJECT2_LIBRARIES} ${PCRE2_LIBRARY} ${ZLIB_LIBRARIES} ${ZSTD_LIBRARIES} stdc++ m ${OPENSSL_LINK_LIBRARIES})
+  target_link_libraries(myloader ${MYSQL_LIBRARIES} ${GLIB2_LIBRARIES} ${GTHREAD2_LIBRARIES} ${PCRE2_LIBRARY} ${ZLIB_LIBRARIES} ${ZSTD_LIBRARIES} stdc++ ${OPENSSL_LINK_LIBRARIES})
 else ()
-  target_link_libraries(mydumper ${JEMALLOC_LIBRARIES} ${MYSQL_LIBRARIES} ${GLIB2_LIBRARIES} ${GTHREAD2_LIBRARIES} ${GIO2_LIBRARIES} ${GOBJECT2_LIBRARIES} ${PCRE2_LIBRARY} ${ZLIB_LIBRARIES} stdc++ m ${OPENSSL_LINK_LIBRARIES})
-  target_link_libraries(myloader ${JEMALLOC_LIBRARIES} ${MYSQL_LIBRARIES} ${GLIB2_LIBRARIES} ${GTHREAD2_LIBRARIES} ${PCRE2_LIBRARY} ${ZLIB_LIBRARIES} stdc++ ${OPENSSL_LINK_LIBRARIES})
+  target_link_libraries(mydumper ${JEMALLOC_LIBRARIES} ${MYSQL_LIBRARIES} ${GLIB2_LIBRARIES} ${GTHREAD2_LIBRARIES} ${GIO2_LIBRARIES} ${GOBJECT2_LIBRARIES} ${PCRE2_LIBRARY} ${ZLIB_LIBRARIES} ${ZSTD_LIBRARIES} stdc++ m ${OPENSSL_LINK_LIBRARIES})
+  target_link_libraries(myloader ${JEMALLOC_LIBRARIES} ${MYSQL_LIBRARIES} ${GLIB2_LIBRARIES} ${GTHREAD2_LIBRARIES} ${PCRE2_LIBRARY} ${ZLIB_LIBRARIES} ${ZSTD_LIBRARIES} stdc++ ${OPENSSL_LINK_LIBRARIES})
 
 endif ()
 
@@ -131,6 +153,12 @@ target_link_libraries(test_use_defer_livelock ${GLIB2_LIBRARIES})
 # -DUSE_DEFER_FIX tells the test to exercise the fixed JOB_DEFER handler path.
 target_compile_definitions(test_use_defer_livelock PRIVATE USE_DEFER_FIX)
 add_test(NAME use_defer_livelock COMMAND test_use_defer_livelock)
+
+# Unit test: multiplexed binary stream protocol (GLib + zlib, no MySQL).
+add_executable(test_stream_protocol test/unit/test_stream_protocol.c src/common_stream_protocol.c)
+target_include_directories(test_stream_protocol PRIVATE ${GLIB2_INCLUDE_DIR} ${ZLIB_INCLUDE_DIRS} ${ZSTD_INCLUDE_DIRS})
+target_link_libraries(test_stream_protocol ${GLIB2_LIBRARIES} ${ZLIB_LIBRARIES} ${ZSTD_LIBRARIES})
+add_test(NAME stream_protocol COMMAND test_stream_protocol)
 
 IF(RUN_CPPCHECK)
   include(CppcheckTargets)

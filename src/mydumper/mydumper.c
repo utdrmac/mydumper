@@ -47,13 +47,11 @@ gchar *dump_directory = NULL;
 gboolean daemon_mode = FALSE;
 gchar *disk_limits=NULL;
 gboolean stream = FALSE;
-gboolean no_delete = FALSE;
 
 gboolean skip_constraints = FALSE;
 gboolean skip_indexes = FALSE;
 gboolean skip_metadata_sorting = FALSE;
 
-//gboolean no_stream = FALSE;
 // For daemon mode
 gboolean shutdown_triggered = FALSE;
 
@@ -275,23 +273,33 @@ int main(int argc, char *argv[]) {
   if ((exec_per_thread_extension!=NULL) && (exec_per_thread == NULL))
     m_critical("--exec-per-thread needs to be set when --exec-per-thread-extension (%s) is used", exec_per_thread_extension);
 
-  if (compress_method==NULL && exec_per_thread==NULL) {
+  /* --compress (gzip/zstd) is handled in-process via the linked zlib/libzstd,
+     never by forking an external binary:
+       - with --stream: the stream is compressed in-process (see
+         initialize_stream), and the filenames carry no extension.
+       - without --stream: files are compressed straight to disk with the
+         .gz/.zst extension (see the compressing sink in the file handler).
+     Only a custom --exec-per-thread command still uses the fork-per-file pipe. */
+  gboolean compress_in_stream = compress_method != NULL && exec_per_thread == NULL &&
+                                stream;
+  gboolean compress_to_file = compress_method != NULL && exec_per_thread == NULL &&
+                              !stream;
+
+  if ((compress_method==NULL && exec_per_thread==NULL) || compress_in_stream) {
     exec_per_thread_extension=EMPTY_STRING;
+  }else if (compress_to_file) {
+    /* In-process on-disk compression: set the extension so output filenames and
+       LOAD DATA references carry .gz/.zst, and install the compressing sink. */
+    if (g_ascii_strcasecmp(compress_method,GZIP)==0)
+      exec_per_thread_extension=GZIP_EXTENSION;
+    else
+      exec_per_thread_extension=ZSTD_EXTENSION;
+    set_compress_to_file();
   }else{
     set_pipe_backup();
 
     if (compress_method!=NULL && exec_per_thread!=NULL )
       m_critical("--compression and --exec-per-thread are not comptatible");
-
-    if (compress_method){
-      if ( g_ascii_strcasecmp(compress_method,GZIP)==0){
-        exec_per_thread=g_strdup_printf("%s -c", GZIP);
-        exec_per_thread_extension=GZIP_EXTENSION;
-      }else if (g_ascii_strcasecmp(compress_method,ZSTD)==0){
-        exec_per_thread=g_strdup_printf("%s -c", ZSTD);
-        exec_per_thread_extension=ZSTD_EXTENSION;
-      }
-    }
 
     exec_per_thread_cmd=g_strsplit(exec_per_thread, " ", 0);
     gchar *tmpcmd=g_find_program_in_path(exec_per_thread_cmd[0]);
@@ -299,6 +307,17 @@ int main(int argc, char *argv[]) {
       m_critical("%s was not found in PATH, use --exec-per-thread for non default locations",exec_per_thread_cmd[0]);
     exec_per_thread_cmd[0]=tmpcmd;
   }
+
+  /* With --stream the backup is written to stdout, not to a directory, so an
+     explicit -o/--outputdir is an invalid configuration. --compress and
+     --exec-per-thread turn on the on-disk pipe backup internally, but they must
+     NOT suppress this validation (the user still asked to stream). A plain
+     (non-stream) dump still writes to the directory. */
+  if (output_directory_str != NULL && stream)
+    m_critical("-o/--outputdir is incompatible with --stream: the backup is "
+               "written to stdout, not to a directory. Remove -o/--outputdir "
+               "(this also applies together with --compress/--exec-per-thread), "
+               "or redirect stdout to a file if you need to save it to disk.");
 
   initialize_set_names();
 

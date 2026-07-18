@@ -17,24 +17,131 @@
 
 #include <mysql.h>
 #include <glib/gstdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <zlib.h>
+#include <zstd.h>
 
 #include "myloader.h"
 #include "myloader_common.h"
 #include "myloader_control_job.h"
 #include "myloader_process_filename.h"
 #include "myloader_global.h"
+#include "../common_stream_protocol.h"
 
 GThread *stream_thread = NULL;
 void *process_stream(struct configuration *stream_conf);
+static void *process_stream_legacy(struct configuration *stream_conf,
+                                   const guchar *prefill, gsize prefill_len);
+static void *process_binary_stream_loader(struct configuration *conf,
+                                          const guchar *prefix, gsize prefix_len);
 
 static GMutex *metadata_header_mutex=NULL;
 static gboolean metadata_header_done=FALSE;
 static GCond *metadata_header_cond= NULL;
 
+/* ------------------------------------------------------------------ *
+ *  In-memory streamed-file registry (Phase 3)                         *
+ *                                                                     *
+ *  When the incoming stream uses the binary protocol, received files  *
+ *  are reconstructed in memory instead of being written to disk and   *
+ *  read back. Bulk data / schema / .dat files are kept here and served *
+ *  to the restore pipeline via myl_open()/fmemopen(); tiny metadata   *
+ *  files are still materialised on disk (read via GKeyFile).           *
+ * ------------------------------------------------------------------ */
+
+struct stream_mem_file {
+  gchar *data;
+  gsize len;
+};
+
+static gboolean stream_binary_active = FALSE;
+static GHashTable *stream_mem_files = NULL; /* basename -> struct stream_mem_file */
+static GMutex *stream_mem_mutex = NULL;
+
+/* Byte budget backpressure: the demux thread blocks before accumulating more
+   data once the in-flight bytes exceed the cap, throttling the sender over the
+   single pipe while bounding loader memory. */
+static gint64 stream_mem_bytes = 0;
+static guint64 stream_mem_cap = 512ULL * 1024 * 1024;
+static GMutex *stream_mem_budget_mutex = NULL;
+static GCond *stream_mem_budget_cond = NULL;
+
+static void stream_mem_budget_reserve(gsize len){
+  g_mutex_lock(stream_mem_budget_mutex);
+  while (stream_mem_bytes > 0 &&
+         stream_mem_bytes + (gint64)len > (gint64)stream_mem_cap)
+    g_cond_wait(stream_mem_budget_cond, stream_mem_budget_mutex);
+  stream_mem_bytes += (gint64)len;
+  g_mutex_unlock(stream_mem_budget_mutex);
+}
+
+void stream_mem_release_bytes(gsize len){
+  if (!stream_mem_budget_mutex)
+    return;
+  g_mutex_lock(stream_mem_budget_mutex);
+  stream_mem_bytes -= (gint64)len;
+  g_cond_broadcast(stream_mem_budget_cond);
+  g_mutex_unlock(stream_mem_budget_mutex);
+}
+
+gboolean stream_mem_active(void){
+  return stream_binary_active;
+}
+
+/* Store a completed file's bytes. Takes ownership of data. */
+static void stream_mem_put(const gchar *basename, gchar *data, gsize len){
+  struct stream_mem_file *mf = g_new0(struct stream_mem_file, 1);
+  mf->data = data;
+  mf->len = len;
+  g_mutex_lock(stream_mem_mutex);
+  g_hash_table_insert(stream_mem_files, g_strdup(basename), mf);
+  g_mutex_unlock(stream_mem_mutex);
+}
+
+/* Steal a stored file if present. Caller owns *data and must g_free it and call
+   stream_mem_release_bytes(*len) when done. */
+gboolean stream_mem_get(const gchar *basename, gchar **data, gsize *len){
+  if (!stream_mem_files)
+    return FALSE;
+  gboolean found = FALSE;
+  g_mutex_lock(stream_mem_mutex);
+  struct stream_mem_file *mf = g_hash_table_lookup(stream_mem_files, basename);
+  if (mf){
+    *data = mf->data;
+    *len = mf->len;
+    g_hash_table_remove(stream_mem_files, basename);
+    found = TRUE;
+  }
+  g_mutex_unlock(stream_mem_mutex);
+  return found;
+}
+
 void initialize_stream (struct configuration *c){
-  stream_thread = m_thread_new("myloader_stream",(GThreadFunc)process_stream, c, "Stream thread could not be created");
+  /* In stream mode the backup is read from stdin. If stdin is a terminal, no
+     data was piped in. Fail fast with a clear message. An empty pipe/file still yields EOF
+     and is handled gracefully by the release guard on the stream thread. */
+  if (isatty(fileno(stdin)))
+    m_critical("--stream expects the backup on stdin, but stdin is a terminal "
+               "(nothing was piped in). Pipe a stream instead, e.g. "
+               "`mydumper --stream ... | myloader --stream ...`.");
+
+  const gchar *budget_env = g_getenv("MYLOADER_STREAM_BUDGET_MB");
+  if (budget_env){
+    guint64 mb = g_ascii_strtoull(budget_env, NULL, 10);
+    if (mb)
+      stream_mem_cap = mb * 1024 * 1024;
+  }
+  stream_mem_files = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+  stream_mem_mutex = g_mutex_new();
+  stream_mem_budget_mutex = g_mutex_new();
+  stream_mem_budget_cond = g_cond_new();
+  /* Create the metadata-header sync primitives before starting the stream
+     thread so it can safely signal them the instant it reaches EOF (avoids a
+     latent startup race with the release guard below). */
   metadata_header_mutex=g_mutex_new();
   metadata_header_cond= g_cond_new();
+  stream_thread = m_thread_new("myloader_stream",(GThreadFunc)process_stream, c, "Stream thread could not be created");
 }
 
 void wait_stream_to_finish(){
@@ -54,6 +161,26 @@ void metadata_has_been_processed(){
   metadata_header_done=TRUE;
   g_cond_signal(metadata_header_cond);
   g_mutex_unlock(metadata_header_mutex);
+}
+
+/* Guard for a producer that dies before sending the metadata header: the main
+   thread blocks in wait_stream_to_process_metadata_header() until
+   metadata_has_been_processed() runs (when the metadata.header file is parsed).
+   If the stream ends first (eg: broken pipe, mydumper crash, empty stdin) that never
+   happens, so the stream thread calls this on every exit path to release the
+   waiter and let myloader terminate cleanly instead of hanging on EOF. */
+static void release_metadata_header_if_pending(){
+  gboolean forced=FALSE;
+  g_mutex_lock(metadata_header_mutex);
+  if (!metadata_header_done){
+    metadata_header_done=TRUE;
+    forced=TRUE;
+    g_cond_signal(metadata_header_cond);
+  }
+  g_mutex_unlock(metadata_header_mutex);
+  if (forced)
+    g_warning("Stream ended before the metadata header was received; the source "
+              "may have failed or sent no data. Nothing to restore.");
 }
 
 
@@ -85,11 +212,12 @@ gboolean has_mydumper_suffix(gchar *line){
     g_str_has_prefix(line,"metadata");
 }
 
-void *process_stream(struct configuration *stream_conf){
+static void *process_stream_legacy(struct configuration *stream_conf,
+                                   const guchar *prefill, gsize prefill_len){
   (void) stream_conf;
   set_thread_name("STT");
   char * filename=NULL,*real_filename=NULL,* previous_filename=NULL;
-  guint stream_buffer_size=no_stream?STREAM_BUFFER_SIZE_NO_STREAM:STREAM_BUFFER_SIZE;
+  guint stream_buffer_size=STREAM_BUFFER_SIZE;
   char *buffer=g_new(char, stream_buffer_size);
   FILE *file=NULL;
   guint pos=0,buffer_len=0;
@@ -104,6 +232,13 @@ void *process_stream(struct configuration *stream_conf){
   gchar *table_name=NULL;
   for(i=0;i<stream_buffer_size;i++){
     buffer[i]='\0';
+  }
+  /* Bytes already consumed while auto-detecting the protocol are replayed here
+     so the legacy parser sees the full stream from the beginning. */
+  if (prefill && prefill_len){
+    g_assert(prefill_len < (gsize)stream_buffer_size - 1);
+    memcpy(buffer, prefill, prefill_len);
+    diff = (guint)prefill_len;
   }
   gchar *new_filename,*new_real_filename,*kind=NULL;
   int num=0;
@@ -298,26 +433,20 @@ read_more:
                 // flushing from initial_pos to line_from - 1
                 flush(buffer,initial_pos,line_from-1,file, &total_size);
               }
-              if (!no_stream){
-                // Content of the file are comming from stdin, it is not sharing the backup dir
-                if (total_size < file_size_from_stream){
-                  // The file size reported in the header is not the same that the amount of data written
-                  // this means that the content of the file has the header tag
-                  // we need to flush and continue 
-                  flush(buffer,line_from,line_end-1,file, &total_size);
-                  g_message("Different file size in %s. Should be: %d | Written: %d. But continuing", filename, file_size_from_stream, total_size);
-                  continue;
-                }else if (total_size > file_size_from_stream) {
-                  // we wrote on the file more data than the file size reported in the header
-                  m_critical("Different file size in %s. Should be: %d | Written: %d", filename, file_size_from_stream, total_size);
-                }else{
-                  // The amount of data written and the file size reported in the header match!
-                  total_size=0;
-                }
+              // Content of the file are comming from stdin, it is not sharing the backup dir
+              if (total_size < file_size_from_stream){
+                // The file size reported in the header is not the same that the amount of data written
+                // this means that the content of the file has the header tag
+                // we need to flush and continue
+                flush(buffer,line_from,line_end-1,file, &total_size);
+                g_message("Different file size in %s. Should be: %d | Written: %d. But continuing", filename, file_size_from_stream, total_size);
+                continue;
+              }else if (total_size > file_size_from_stream) {
+                // we wrote on the file more data than the file size reported in the header
+                m_critical("Different file size in %s. Should be: %d | Written: %d", filename, file_size_from_stream, total_size);
               }else{
-                // we do not expect file size reported on the header in this case
-                if (total_size>0)
-                  m_critical("Different file size in %s. Should be: 0 | Written: %d", filename, total_size);
+                // The amount of data written and the file size reported in the header match!
+                total_size=0;
               }
               previous_filename=g_strdup(filename);
               g_free(filename);
@@ -338,18 +467,9 @@ read_more:
               previous_filename=NULL;
             }
             if (g_file_test(real_filename, G_FILE_TEST_EXISTS)){
-              if (no_stream){
-                 if (total_size>0)
-                   m_critical("Different file size in %s. Should be: 0 | Written: %d", filename, total_size);
-                 process_filename_push(filename);
-              }else{
-                g_warning("Stream Thread: File %s exists in datadir, we are not replacing", real_filename);
-                file = NULL;
-              }
+              g_warning("Stream Thread: File %s exists in datadir, we are not replacing", real_filename);
+              file = NULL;
             }else{
-              if (no_stream){
-                m_critical("File %s not found in backup dir when using NO_STREAM.", filename);
-              }
               file = g_fopen(real_filename, "w");
             }
             if (!has_mydumper_suffix(filename)){
@@ -408,17 +528,258 @@ read_more:
   if (mysqldump){
     if (file)
       fclose(file);
-    if (!no_stream && filename)
+    if (filename)
       process_filename_push(filename);
     g_free(filename);
   }else{
     if (file) 
       fclose(file);
-    if (!no_stream && filename)
+    if (filename)
       process_filename_push(filename);
     g_free(filename);
   }
   process_filename_queue_end();
   return NULL;
+}
+
+/* ------------------------------------------------------------------ *
+ *  Binary multiplexed demux (Phase 3)                                 *
+ * ------------------------------------------------------------------ */
+
+struct demux_file {
+  gchar *name;
+  GString *data;      /* reconstructed (decompressed) content */
+  guint8 flags;
+  guint8 codec;       /* MYD_CODEC_* */
+  gboolean compressed;
+  z_stream *zs;       /* zlib inflate state (DEFLATE/GZIP)  */
+  ZSTD_DStream *zds;  /* zstd inflate state (ZSTD)          */
+};
+
+#define STREAM_INFLATE_CHUNK 65536
+
+struct loader_demux {
+  GHashTable *streams; /* stream_id -> struct demux_file */
+};
+
+static void demux_on_open(void *user, guint64 sid, const gchar *name,
+                          guint8 flags, guint8 codec){
+  struct loader_demux *dx = user;
+  struct demux_file *df = g_new0(struct demux_file, 1);
+  df->name = g_strdup(name);
+  df->data = g_string_new("");
+  df->flags = flags;
+  df->codec = codec;
+  if (flags & MYD_FOPEN_FLAG_COMPRESSED){
+    df->compressed = TRUE;
+    switch (codec){
+    case MYD_CODEC_ZSTD:
+      df->zds = ZSTD_createDStream();
+      if (df->zds == NULL)
+        m_critical("Stream: ZSTD_createDStream failed for %s", name);
+      ZSTD_initDStream(df->zds);
+      break;
+    case MYD_CODEC_GZIP:
+    case MYD_CODEC_DEFLATE:
+    default:
+      df->zs = g_new0(z_stream, 1);
+      /* windowBits 15+32 auto-detects zlib (DEFLATE) and gzip wrappers. */
+      if (inflateInit2(df->zs, 15 + 32) != Z_OK)
+        m_critical("Stream: inflateInit2 failed for %s", name);
+      break;
+    }
+  }
+  g_hash_table_insert(dx->streams, GINT_TO_POINTER((gint)sid), df);
+  trace("Stream(recv open): %s id %" G_GUINT64_FORMAT " codec %u", name, sid,
+        codec);
+}
+
+/* Decompress bytes into df->data via the file's codec, reserving budget on the
+   produced (uncompressed) bytes. */
+static void demux_inflate_append(struct demux_file *df, const gchar *buf,
+                                 gsize len){
+  if (df->codec == MYD_CODEC_ZSTD){
+    ZSTD_inBuffer in = {buf, len, 0};
+    while (in.pos < in.size){
+      guchar out[STREAM_INFLATE_CHUNK];
+      ZSTD_outBuffer o = {out, sizeof(out), 0};
+      size_t ret = ZSTD_decompressStream(df->zds, &o, &in);
+      if (ZSTD_isError(ret))
+        m_critical("Stream: zstd decompress failed for %s: %s", df->name,
+                   ZSTD_getErrorName(ret));
+      if (o.pos){
+        stream_mem_budget_reserve(o.pos);
+        g_string_append_len(df->data, (gchar *)out, o.pos);
+      }
+      if (o.pos == 0 && in.pos == in.size)
+        break;
+    }
+    return;
+  }
+  df->zs->next_in = (Bytef *)buf;
+  df->zs->avail_in = (uInt)len;
+  do {
+    guchar out[STREAM_INFLATE_CHUNK];
+    df->zs->next_out = out;
+    df->zs->avail_out = sizeof(out);
+    int ret = inflate(df->zs, Z_NO_FLUSH);
+    if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR ||
+        ret == Z_NEED_DICT)
+      m_critical("Stream: inflate failed for %s (%d)", df->name, ret);
+    gsize produced = sizeof(out) - df->zs->avail_out;
+    if (produced){
+      stream_mem_budget_reserve(produced);
+      g_string_append_len(df->data, (gchar *)out, produced);
+    }
+  } while (df->zs->avail_out == 0);
+}
+
+static void demux_on_data(void *user, guint64 sid, const gchar *buf,
+                          gsize len){
+  struct loader_demux *dx = user;
+  struct demux_file *df =
+      g_hash_table_lookup(dx->streams, GINT_TO_POINTER((gint)sid));
+  if (!df){
+    g_critical("Stream data for unknown id %" G_GUINT64_FORMAT, sid);
+    return;
+  }
+  if (df->compressed){
+    demux_inflate_append(df, buf, len);
+  }else{
+    stream_mem_budget_reserve(len);
+    g_string_append_len(df->data, buf, len);
+  }
+}
+
+static void demux_on_close(void *user, guint64 sid, guint64 total,
+                           gboolean has_crc, guint32 crc){
+  struct loader_demux *dx = user;
+  struct demux_file *df =
+      g_hash_table_lookup(dx->streams, GINT_TO_POINTER((gint)sid));
+  if (!df){
+    g_critical("Stream close for unknown id %" G_GUINT64_FORMAT, sid);
+    return;
+  }
+  g_hash_table_steal(dx->streams, GINT_TO_POINTER((gint)sid));
+
+  if (df->zs){
+    inflateEnd(df->zs);
+    g_free(df->zs);
+    df->zs = NULL;
+  }
+  if (df->zds){
+    ZSTD_freeDStream(df->zds);
+    df->zds = NULL;
+  }
+
+  if (df->data->len != total)
+    m_critical("Stream: size mismatch for %s. Declared: %" G_GUINT64_FORMAT
+               " received: %zu", df->name, total, df->data->len);
+  if (has_crc){
+    uLong seed = crc32(0L, Z_NULL, 0);
+    guint32 got = (guint32)crc32(seed, (const Bytef *)df->data->str,
+                                 df->data->len);
+    if (got != crc)
+      m_critical("Stream: checksum mismatch for %s (got %08x expected %08x)",
+                 df->name, got, crc);
+  }
+
+  gsize len = df->data->len;
+  gchar *bytes = g_string_free(df->data, FALSE); /* keep buffer */
+
+  if (g_str_has_prefix(df->name, "metadata")){
+    /* Metadata is consumed via GKeyFile from a real path, so materialise it
+       on disk (tiny). */
+    gchar *path = g_build_filename(directory, df->name, NULL);
+    GError *gerror = NULL;
+    if (!g_file_set_contents(path, bytes, len, &gerror))
+      m_critical("Stream: could not write metadata %s: %s", path,
+                 gerror ? gerror->message : "unknown");
+    g_free(path);
+    g_free(bytes);
+    stream_mem_release_bytes(len);
+  }else{
+    /* Bulk data / schema / .dat: served from memory by myl_open / the LOAD
+       DATA local-infile handler. */
+    stream_mem_put(df->name, bytes, len);
+  }
+  process_filename_push(df->name);
+  g_free(df->name);
+  g_free(df);
+}
+
+static void demux_free_pending(gpointer p){
+  struct demux_file *df = p;
+  if (df->zs){
+    inflateEnd(df->zs);
+    g_free(df->zs);
+  }
+  if (df->zds)
+    ZSTD_freeDStream(df->zds);
+  g_string_free(df->data, TRUE);
+  g_free(df->name);
+  g_free(df);
+}
+
+static void *process_binary_stream_loader(struct configuration *conf,
+                                          const guchar *prefix,
+                                          gsize prefix_len){
+  (void)conf;
+  set_thread_name("STT");
+  struct loader_demux dx;
+  dx.streams = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
+                                     demux_free_pending);
+  struct myd_stream_callbacks cb = {demux_on_open, demux_on_data,
+                                    demux_on_close, NULL};
+  struct myd_stream_decoder *d = myd_stream_decoder_new(&cb, &dx);
+
+  if (prefix_len){
+    if (myd_stream_decoder_feed(d, prefix, prefix_len) == MYD_DECODE_ERROR)
+      m_critical("Corrupted binary stream header");
+  }
+
+  guchar *buf = g_malloc(STREAM_BUFFER_SIZE);
+  size_t n;
+  while ((n = fread(buf, 1, STREAM_BUFFER_SIZE, stdin)) > 0){
+    if (myd_stream_decoder_feed(d, buf, n) == MYD_DECODE_ERROR)
+      m_critical("Corrupted binary stream");
+    if (myd_stream_decoder_saw_eof(d))
+      break;
+  }
+  g_free(buf);
+  myd_stream_decoder_free(d);
+  g_hash_table_destroy(dx.streams);
+  process_filename_queue_end();
+  return NULL;
+}
+
+void *process_stream(struct configuration *stream_conf){
+  set_thread_name("STT");
+  void *ret;
+  /* The mysqldump format has no binary magic and is parsed by the legacy
+     reader. */
+  if (mysqldump){
+    ret = process_stream_legacy(stream_conf, NULL, 0);
+    release_metadata_header_if_pending();
+    return ret;
+  }
+
+  /* Auto-detect: peek the leading bytes. If they are the binary magic, use the
+     multiplexed decoder; otherwise fall back to the legacy textual parser,
+     replaying the peeked bytes. A short/empty read here means the producer sent
+     nothing (crash / broken pipe): the legacy parser exits on EOF and the guard
+     below unblocks the metadata-header waiter. */
+  guchar magic[MYD_STREAM_MAGIC_LEN];
+  size_t got = fread(magic, 1, MYD_STREAM_MAGIC_LEN, stdin);
+  if (got == MYD_STREAM_MAGIC_LEN &&
+      memcmp(magic, MYD_STREAM_MAGIC, MYD_STREAM_MAGIC_LEN) == 0){
+    stream_binary_active = TRUE;
+    ret = process_binary_stream_loader(stream_conf, magic, got);
+    release_metadata_header_if_pending();
+    return ret;
+  }
+  ret = process_stream_legacy(stream_conf, magic, got);
+  release_metadata_header_if_pending();
+  return ret;
 }
 

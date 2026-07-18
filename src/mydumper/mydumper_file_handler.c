@@ -23,6 +23,9 @@
 #include <errno.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <string.h>
+#include <zlib.h>
+#include <zstd.h>
 
 #include "mydumper_global.h"
 #include "mydumper_stream.h"
@@ -31,6 +34,188 @@
 
 // Shared variables
 int (*m_close)(guint thread_id, int file, gchar *filename, guint64 size, struct db_table * dbt) = NULL;
+// Byte sink indirection: default writes to a real fd; the diskless stream sink
+// (see mydumper_stream.c) redirects bytes straight into the multiplexed stream.
+ssize_t (*m_write)(int file, const char *buf, gsize len) = NULL;
+
+static ssize_t default_m_write(int file, const char *buf, gsize len){
+  return write(file, buf, len);
+}
+
+/* ------------------------------------------------------------------ *
+ *  In-process on-disk compression (gzip via zlib, zstd via libzstd)   *
+ *                                                                     *
+ *  When --compress is used without --stream and without a custom      *
+ *  --exec-per-thread command, files are compressed in-process and     *
+ *  written straight to disk (with the .gz/.zst extension) instead of  *
+ *  forking a gzip/zstd child per file. This removes the external      *
+ *  binary dependency; zstd offloads compression to its own worker     *
+ *  threads (ZSTD_c_nbWorkers) so the dump worker is not blocked.      *
+ * ------------------------------------------------------------------ */
+#define CFILE_GZIP 1
+#define CFILE_ZSTD 2
+#define CFILE_CHUNK 65536
+
+static gboolean compress_to_file = FALSE;
+static GHashTable *cfile_hash = NULL;   /* fd -> struct cfile* */
+static GMutex *cfile_mutex = NULL;
+
+struct cfile {
+  int fd;
+  gchar *filename;      /* on-disk name including compression extension */
+  guint8 codec;
+  z_stream *zs;         /* gzip (zlib) state */
+  ZSTD_CStream *zc;     /* zstd state */
+};
+
+void set_compress_to_file(){
+  compress_to_file = TRUE;
+}
+
+/* Number of zstd worker threads per file. Default 1 offloads compression to a
+   background thread (mirroring the old per-file `zstd -c` process) without
+   oversubscribing; override with MYDUMPER_ZSTD_WORKERS. */
+static int cfile_zstd_workers(void){
+  static int cached = -1;
+  if (cached < 0){
+    const gchar *e = g_getenv("MYDUMPER_ZSTD_WORKERS");
+    cached = e ? (int)g_ascii_strtoll(e, NULL, 10) : 1;
+    if (cached < 0)
+      cached = 0;
+  }
+  return cached;
+}
+
+static void cfile_full_write(int fd, const guchar *buf, size_t len){
+  size_t written = 0;
+  while (written < len){
+    ssize_t r = write(fd, buf + written, len - written);
+    if (r < 0)
+      m_critical("Couldn't write compressed data to file(%d): %s", fd,
+                 strerror(errno));
+    written += (size_t)r;
+  }
+}
+
+/* Compress `len` bytes from `buf` through the file's codec and write the output
+   to the file. `finish` flushes the compressor tail at close. Only the owning
+   worker thread touches a given cfile. */
+static void cfile_compress_write(struct cfile *cf, const char *buf, gsize len,
+                                 gboolean finish){
+  if (cf->codec == CFILE_ZSTD){
+    ZSTD_inBuffer in = {buf, len, 0};
+    int done;
+    do {
+      guchar out[CFILE_CHUNK];
+      ZSTD_outBuffer o = {out, sizeof(out), 0};
+      size_t rem = ZSTD_compressStream2(cf->zc, &o, &in,
+                                        finish ? ZSTD_e_end : ZSTD_e_continue);
+      if (ZSTD_isError(rem))
+        m_critical("zstd compress failed for %s: %s", cf->filename,
+                   ZSTD_getErrorName(rem));
+      cfile_full_write(cf->fd, out, o.pos);
+      done = finish ? (rem == 0) : (in.pos == in.size);
+    } while (!done);
+  }else{
+    int flush = finish ? Z_FINISH : Z_NO_FLUSH;
+    cf->zs->next_in = (Bytef *)buf;
+    cf->zs->avail_in = (uInt)len;
+    do {
+      guchar out[CFILE_CHUNK];
+      cf->zs->next_out = out;
+      cf->zs->avail_out = sizeof(out);
+      int ret = deflate(cf->zs, flush);
+      if (ret == Z_STREAM_ERROR)
+        m_critical("deflate failed for %s", cf->filename);
+      cfile_full_write(cf->fd, out, sizeof(out) - cf->zs->avail_out);
+    } while (cf->zs->avail_out == 0);
+  }
+}
+
+static int m_open_cfile(char **filename, const char *type){
+  (void)type;
+  gchar *new_filename = g_strdup_printf("%s%s", *filename, exec_per_thread_extension);
+  int fd = open(new_filename, O_CREAT | O_WRONLY | O_TRUNC, 0660);
+  if (fd < 0)
+    m_critical("Couldn't open file(%s): %s", new_filename, strerror(errno));
+  dump_summary_note_file_created();
+  struct cfile *cf = g_new0(struct cfile, 1);
+  cf->fd = fd;
+  cf->filename = new_filename;
+  if (compress_method != NULL && g_ascii_strcasecmp(compress_method, ZSTD) == 0){
+    cf->codec = CFILE_ZSTD;
+    cf->zc = ZSTD_createCStream();
+    if (cf->zc == NULL)
+      m_critical("ZSTD_createCStream failed for %s", cf->filename);
+    ZSTD_CCtx_setParameter(cf->zc, ZSTD_c_compressionLevel, ZSTD_CLEVEL_DEFAULT);
+    int workers = cfile_zstd_workers();
+    if (workers > 0)
+      ZSTD_CCtx_setParameter(cf->zc, ZSTD_c_nbWorkers, workers);
+  }else{
+    cf->codec = CFILE_GZIP;
+    cf->zs = g_new0(z_stream, 1);
+    if (deflateInit2(cf->zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8,
+                     Z_DEFAULT_STRATEGY) != Z_OK)
+      m_critical("deflateInit2 failed for %s", cf->filename);
+  }
+  g_mutex_lock(cfile_mutex);
+  g_hash_table_insert(cfile_hash, GINT_TO_POINTER(fd), cf);
+  g_mutex_unlock(cfile_mutex);
+  return fd;
+}
+
+static ssize_t m_write_cfile(int file, const char *buf, gsize len){
+  g_mutex_lock(cfile_mutex);
+  struct cfile *cf = g_hash_table_lookup(cfile_hash, GINT_TO_POINTER(file));
+  g_mutex_unlock(cfile_mutex);
+  if (!cf){
+    g_critical("Compressed write to unknown handle %d", file);
+    return -1;
+  }
+  if (len)
+    cfile_compress_write(cf, buf, len, FALSE);
+  return (ssize_t)len;
+}
+
+static int m_close_cfile(guint thread_id, int file, gchar *filename,
+                         guint64 size, struct db_table *dbt){
+  (void)thread_id;
+  (void)filename;
+  g_mutex_lock(cfile_mutex);
+  struct cfile *cf = g_hash_table_lookup(cfile_hash, GINT_TO_POINTER(file));
+  if (cf)
+    g_hash_table_remove(cfile_hash, GINT_TO_POINTER(file));
+  g_mutex_unlock(cfile_mutex);
+  if (!cf)
+    return 0;
+
+  cfile_compress_write(cf, NULL, 0, TRUE); /* flush compressor tail */
+  if (cf->zs){
+    deflateEnd(cf->zs);
+    g_free(cf->zs);
+  }
+  if (cf->zc)
+    ZSTD_freeCStream(cf->zc);
+  if (fsync(cf->fd))
+    g_warning("while syncing file %s (%d)", cf->filename, errno);
+  close(cf->fd);
+
+  if (size > 0){
+    if (exec_command)
+      exec_queue_push(dbt, g_strdup(cf->filename));
+    else if (stream)
+      stream_queue_push(dbt, g_strdup(cf->filename));
+  }else if (!build_empty_files){
+    if (remove(cf->filename))
+      g_warning("Thread %d: Failed to remove empty file : %s", thread_id,
+                cf->filename);
+    else
+      dump_summary_note_file_removed();
+  }
+  g_free(cf->filename);
+  g_free(cf);
+  return 0;
+}
 
 // Static
 static GAsyncQueue *close_file_queue=NULL;
@@ -381,9 +566,21 @@ void set_pipe_backup(){
   is_pipe=TRUE;
 }
 
+gboolean is_pipe_backup(){
+  return is_pipe;
+}
+
 void initialize_file_handler(){
   reset_dump_summary();
-  if (!is_pipe){
+  m_write = &default_m_write;
+  if (compress_to_file){
+    /* In-process on-disk compression: no fork, compress straight to the file. */
+    m_open  = &m_open_cfile;
+    m_write = &m_write_cfile;
+    m_close = &m_close_cfile;
+    cfile_hash = g_hash_table_new(g_direct_hash, g_direct_equal);
+    cfile_mutex = g_mutex_new();
+  }else if (!is_pipe){
     m_open  = &m_open_file;
     m_close = &m_close_file;
   }else{

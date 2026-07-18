@@ -1728,7 +1728,7 @@ void start_dump(struct configuration *conf, GOptionContext *context) {
     }else{
       wait_stream_to_finish();
     }
-    if (no_delete == FALSE && output_directory_str == NULL)
+    if (output_directory_str == NULL)
       if (g_rmdir(output_directory) != 0)
         g_critical("Backup directory not removed: %s", output_directory);
   }

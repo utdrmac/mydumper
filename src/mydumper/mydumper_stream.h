@@ -16,6 +16,7 @@
 */
 #define METADATA_PARTIAL_INTERVAL 2
 void initialize_stream();
+void *process_binary_stream(void *data);
 void wait_stream_to_finish();
 void metadata_partial_push (struct db_table *dbt);
 void stream_queue_push(struct db_table *dbt,gchar *filename);

@@ -19,3 +19,8 @@ void initialize_stream (struct configuration *conf);
 void wait_stream_to_finish();
 void wait_stream_to_process_metadata_header();
 void metadata_has_been_processed();
+
+/* In-memory streamed-file registry (binary protocol). */
+gboolean stream_mem_active(void);
+gboolean stream_mem_get(const gchar *basename, gchar **data, gsize *len);
+void stream_mem_release_bytes(gsize len);

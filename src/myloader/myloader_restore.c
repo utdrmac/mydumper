@@ -33,6 +33,7 @@
 #include "myloader_process.h"
 #include "myloader_restore.h"
 #include "myloader_database.h"
+#include "myloader_stream.h"
 #include "../logging.h"
 
 extern gboolean dry_run;
@@ -164,6 +165,98 @@ void initialize_restore(){
     replace_definer_str=g_strdup_printf("DEFINER=%s",replace_definer);
 }
 
+/* ------------------------------------------------------------------ *
+ *  Memory-backed LOAD DATA LOCAL INFILE handler (Phase 4)             *
+ *                                                                     *
+ *  In binary stream mode the .dat file lives in the in-memory registry *
+ *  rather than on disk, so we feed MySQL directly from that buffer.    *
+ *  Any file not present in the registry (e.g. the compressed FIFO path *
+ *  or non-stream mode) falls back to reading the file from disk, so    *
+ *  existing behaviour is preserved.                                    *
+ * ------------------------------------------------------------------ */
+struct local_infile_ctx {
+  gboolean from_mem;
+  gchar *data;   /* memory: owned buffer */
+  gsize len;
+  gsize pos;
+  FILE *fp;      /* disk fallback */
+  int err;
+};
+
+static int myl_local_infile_init(void **ptr, const char *filename, void *userdata){
+  (void)userdata;
+  struct local_infile_ctx *c = g_new0(struct local_infile_ctx, 1);
+  *ptr = c;
+  if (stream_mem_active()){
+    gchar *base = g_path_get_basename(filename);
+    gchar *data = NULL;
+    gsize len = 0;
+    gboolean found = stream_mem_get(base, &data, &len);
+    g_free(base);
+    if (found){
+      c->from_mem = TRUE;
+      c->data = data;
+      c->len = len;
+      c->pos = 0;
+      return 0;
+    }
+  }
+  /* On-disk .gz/.zst are decompressed in-process; other files open directly. */
+  guint8 codec = builtin_decompress_codec(filename);
+  if (codec)
+    c->fp = open_decompress_file(filename, codec);
+  else
+    c->fp = fopen(filename, "rb");
+  if (!c->fp){
+    c->err = errno;
+    return -1;
+  }
+  return 0;
+}
+
+static int myl_local_infile_read(void *ptr, char *buf, unsigned int buf_len){
+  struct local_infile_ctx *c = ptr;
+  if (c->from_mem){
+    gsize remaining = c->len - c->pos;
+    gsize n = remaining < buf_len ? remaining : buf_len;
+    if (n){
+      memcpy(buf, c->data + c->pos, n);
+      c->pos += n;
+    }
+    return (int)n;
+  }
+  size_t n = fread(buf, 1, buf_len, c->fp);
+  if (n == 0 && ferror(c->fp)){
+    c->err = errno;
+    return -1;
+  }
+  return (int)n;
+}
+
+static void myl_local_infile_end(void *ptr){
+  struct local_infile_ctx *c = ptr;
+  if (!c)
+    return;
+  if (c->from_mem){
+    g_free(c->data);
+    stream_mem_release_bytes(c->len);
+  }else if (c->fp){
+    fclose(c->fp);
+  }
+  g_free(c);
+}
+
+static int myl_local_infile_error(void *ptr, char *error_msg,
+                                  unsigned int error_msg_len){
+  struct local_infile_ctx *c = ptr;
+  if (c && c->err){
+    snprintf(error_msg, error_msg_len, "%s", strerror(c->err));
+    return c->err;
+  }
+  snprintf(error_msg, error_msg_len, "streamed LOCAL INFILE error");
+  return EIO;
+}
+
 struct connection_data *new_connection_data(MYSQL *thrconn){
   struct connection_data *cd=g_new(struct connection_data,1);
   if (thrconn)
@@ -172,6 +265,12 @@ struct connection_data *new_connection_data(MYSQL *thrconn){
     cd->thrconn = mysql_init(NULL);
     m_connect(cd->thrconn);
   }
+  /* Serve LOAD DATA LOCAL INFILE from the in-memory stream (stream mode) or by
+     decompressing on-disk .gz/.zst in-process; the handler falls back to a plain
+     file read otherwise, so it is safe to install unconditionally. */
+  mysql_set_local_infile_handler(cd->thrconn, myl_local_infile_init,
+                                 myl_local_infile_read, myl_local_infile_end,
+                                 myl_local_infile_error, NULL);
   cd->current_database=NULL;
   cd->connection_id=mysql_thread_id(cd->thrconn);
   cd->ready=g_async_queue_new();
@@ -941,10 +1040,12 @@ int restore_data_from_mydumper_file(struct thread_data *td, const char *filename
           ir=NULL;
           process_result_statement(cd->queue->result, &ir, m_critical, "(2)Error occurs processing file %s", filename);
           if (is_fifo){
-            if (stream && !no_delete) 
+            if (stream)
               g_unlink(load_data_filename);
             m_remove0(NULL, load_data_fifo_filename);
-          }else
+          }else if (!stream_mem_active())
+            /* In binary stream mode the .dat is served from memory (consumed
+               by the local-infile handler), so there is no file to remove. */
             m_remove(NULL, load_data_filename);
         }else{
           if (g_strrstr_len(data->str,3,"/*!")){
