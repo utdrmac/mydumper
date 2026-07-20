@@ -172,8 +172,3 @@ void enqueue_indexes_if_possible(struct configuration *conf){
   }
   g_mutex_unlock(conf->table_list_mutex);
 }
-
-void free_index_worker_threads(){
-  g_free(index_td);
-  g_free(index_threads);
-}

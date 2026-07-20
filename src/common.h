@@ -135,14 +135,12 @@ struct function_pointer{
 
 gchar * remove_new_line(gchar *to);
 int write_file(FILE * file, char * buff, int len);
-guint strcount(gchar *text);
 gboolean m_remove0(gchar * directory, const gchar * filename);
 gboolean m_remove(gchar * directory, const gchar * filename);
 GKeyFile * load_config_file(gchar * config_file);
 void load_config_group(GKeyFile *kf, GOptionContext *context, const gchar * group);
 void execute_gstring(MYSQL *conn, GString *ss);
 gchar *replace_escaped_strings(gchar *c);
-void escape_tab_with(gchar *to);
 void load_hash_from_key_file(GKeyFile *kf, GHashTable * set_session_hash, const gchar * group_variables);
 void load_per_table_info_from_key_file(GKeyFile *kf, GHashTable * conf_per_table, struct function_pointer * init_function_pointer());
 void refresh_set_session_from_hash(GString *ss, GHashTable * set_session_hash);
@@ -158,7 +156,6 @@ void free_hash_table(GHashTable * hash);
 void remove_definer(GString * data);
 void remove_definer_from_gchar(char * str);
 void replace_definer_from_string(GString * data, char * _replace);
-void replace_definer_from_gchar (GString * output_data, char * str, char * _replace);
 void update_definer(GString *statement, gchar *replace_definer_str, gboolean skip_definer);
 void print_version(const gchar *program);
 gboolean stream_arguments_callback(const gchar *option_name,const gchar *value, gpointer data, GError **error);
@@ -192,8 +189,6 @@ void print_bool(const char*_key, gboolean val);
 void print_list(const char*_key, GList *list, gchar* f (void *));
 void print_common();
 
-gchar *get_zstd_cmd();
-gchar *get_gzip_cmd();
 char * double_quoute_protect(char *r);
 char * backtick_protect(char *r);
 char * newline_protect(char *r);

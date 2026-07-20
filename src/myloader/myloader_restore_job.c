@@ -87,14 +87,6 @@ struct restore_job * new_schema_restore_job( char * filename, enum restore_job_t
   return srj;
 }
 
-void free_restore_job(struct restore_job * rj){
-  // We consider that
-  if (rj->filename != NULL ) g_free(rj->filename);
-//  if ( !shutdown_triggered && rj->filename != NULL ) g_free(rj->filename);
-//  if (rj->statement != NULL ) g_string_free(rj->statement,TRUE);
-  if (rj != NULL ) g_free(rj);
-}
-
 void free_schema_restore_job(struct schema_restore_job *srj){
 //  g_free(srj->database);
 //  if (srj->statement!=NULL) g_string_free(srj->statement, TRUE);
@@ -639,7 +631,6 @@ int process_restore_job(struct thread_data *td, struct restore_job *rj){
     }
 cleanup:
   (void) rj;
-//  if (rj != NULL ) free_restore_job(rj);
     td->status=COMPLETED;
   return 0;
 }

@@ -56,14 +56,6 @@ guint throttle_max_usleep_limit=60000000;
 
 gchar *set_names_in_conn_for_sct=NULL, *set_names_in_file_for_sct=NULL, *set_names_in_file_by_default=NULL;
 
-gchar *get_zstd_cmd(){
-  return g_find_program_in_path("zstd");
-}
-
-gchar *get_gzip_cmd(){
-  return g_find_program_in_path("gzip");
-}
-
 GHashTable * initialize_hash_of_session_variables(){
   GHashTable * set_session_hash=g_hash_table_new ( g_str_hash, g_str_equal );
   if (is_mysql_like()){
@@ -359,21 +351,6 @@ void load_hash_of_all_variables_perproduct_from_key_file(GKeyFile *kf, GHashTabl
   load_hash_from_key_file(kf,set_session_hash,s->str);
 }
 
-// This function is like g_key_file_has_group but is case insensitive
-gboolean m_key_file_has_group (GKeyFile* kf, const gchar* group_name){
-  gchar **groups=g_key_file_get_groups(kf, NULL);
-  guint i=0;
-  while (groups[i]){
-    if (!g_ascii_strcasecmp(groups[i],group_name)){
-      g_strfreev(groups);
-      return TRUE;
-    }
-    i++;
-  }
-  g_strfreev(groups);
-  return FALSE;
-}
-
 void load_options_for_product_from_key_file(GKeyFile *kf, GOptionContext *context, const gchar *app, int major, int secondary, int revision){
   GString *group=g_string_sized_new(50);
   g_string_append(group, app);
@@ -531,25 +508,6 @@ gchar *replace_escaped_strings(gchar *c){
   return c;
 }
 
-void escape_tab_with(gchar *to){
-  gchar *from=g_strdup(to);
-  guint i=0,j=0;
-  while (from[i]!='\0'){
-    if (from[i]=='\t'){
-      to[j]='\\';
-      j++;
-      to[j]='t';
-    }else
-      to[j]=from[i];
-    i++;
-    j++;
-  }
-  to[j]=from[i];
-  g_free(from);
-//  return to;
-}
-
-
 gboolean create_dir(char *directory){
   if (!help){
     if (g_mkdir(directory, 0750) == -1) {
@@ -565,16 +523,6 @@ gboolean create_dir(char *directory){
 gchar *build_tmp_dir_name(){
   GError*error=NULL;
   return g_dir_make_tmp (NULL, &error);
-}
-
-guint strcount(gchar *text){
-  gchar *t=text;
-  guint i=0;
-  while (t){
-    t=g_strstr_len(t+1,strlen(t),"\n");
-    i++;
-  }
-  return i;
 }
 
 gchar * common_build_schema_table_filename(gchar *_directory, char *database, char *table, const char *suffix){
@@ -834,19 +782,6 @@ void update_definer(GString *statement, gchar *replace_definer_str, gboolean ski
       remove_definer(statement);
     else if (replace_definer_str)
       replace_definer_from_string(statement,replace_definer_str);
-  }
-}
-
-
-void replace_definer_from_gchar (GString * output_data, char * str, char * _replace){
-  char * from = g_strstr_len(str,50," DEFINER=") + 10;
-  if (from){
-    g_string_append_len(output_data, str, from - str - 1);
-    g_string_append(output_data,_replace);
-    char * to=g_strstr_len(from,110," ");
-    if (to){
-      g_string_append(output_data, to);
-    }
   }
 }
 

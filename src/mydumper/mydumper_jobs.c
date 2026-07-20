@@ -853,14 +853,6 @@ void free_schema_job(struct schema_job *sj){
   g_free(sj);
 }
 
-void free_view_job(struct view_job *vj){
-  if (vj->tmp_table_filename)
-    g_free(vj->tmp_table_filename);
-  if (vj->view_filename)
-    g_free(vj->view_filename);
-//  g_free(vj);
-}
-
 void free_create_tablespace_job(struct create_tablespace_job * ctj){
   if (ctj->filename)
     g_free(ctj->filename);

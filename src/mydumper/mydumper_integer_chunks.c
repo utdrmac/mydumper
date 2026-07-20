@@ -233,17 +233,6 @@ struct chunk_step_item * split_chunk_step(struct chunk_step_item * csi){
 }
 
 
-gboolean has_only_one_level(struct chunk_step_item *csi){
-return ( csi->chunk_step->integer_step.is_step_fixed_length && (
-(
-  csi->chunk_step->integer_step.is_unsigned && csi->chunk_step->integer_step.type.unsign.max == csi->chunk_step->integer_step.type.unsign.min
-)||
-(
- !csi->chunk_step->integer_step.is_unsigned && csi->chunk_step->integer_step.type.sign.max   == csi->chunk_step->integer_step.type.sign.min
-)
-) );
-}
-
 static
 gboolean is_splitable(struct chunk_step_item *csi){
 return ( !csi->chunk_step->integer_step.is_step_fixed_length  && (( csi->chunk_step->integer_step.is_unsigned && (csi->chunk_step->integer_step.type.unsign.cursor < csi->chunk_step->integer_step.type.unsign.max

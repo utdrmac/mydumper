@@ -122,8 +122,3 @@ void wait_post_worker_to_finish(){
     g_thread_join(post_threads[n]);
   }
 }
-
-void free_post_worker_threads(){
-  g_free(post_td);
-  g_free(post_threads);
-}

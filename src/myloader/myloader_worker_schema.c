@@ -265,8 +265,3 @@ void wait_schema_worker_to_finish(struct configuration *conf){
   data_control_queue_push(FILE_TYPE_ENDED);
   trace("Schema worker finished");
 }
-
-void free_schema_worker_threads(){
-  g_free(schema_td);
-  g_free(schema_threads);
-}
