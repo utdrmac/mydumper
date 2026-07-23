@@ -25,6 +25,7 @@
 #include "mydumper_global.h"
 #include "mydumper_chunks.h"
 #include "mydumper_common.h"
+#include "mydumper_stream.h"
 
 // Extern
 extern guint64 min_integer_chunk_step_size;
@@ -506,6 +507,8 @@ gboolean new_db_table(struct db_table **d, MYSQL *conn, struct configuration *co
     c=GPOINTER_TO_INT(m_coalesce_hash(g_hash_table_lookup(conf_per_table,SKIP_DATA_CHECKSUMS), config_file_dbt_key, any_db_config_file_dbt_key, any_table_config_file_dbt_key));
     dbt->checksum.skip_data=    c?c:(data_checksums?skip_data_checksums:TRUE);
     dbt->rows=0;
+    dbt->data_files=0;
+    dbt->data_files_complete=FALSE;
  // dbt->chunk_functions.process=NULL;
     b=TRUE;
     g_free(config_file_dbt_key);
@@ -516,3 +519,35 @@ gboolean new_db_table(struct db_table **d, MYSQL *conn, struct configuration *co
   return b;
 }
 
+gboolean is_data_restore_filename(const gchar *filename){
+  if (filename == NULL || !g_str_has_suffix(filename, ".sql"))
+    return FALSE;
+  if (g_str_has_suffix(filename, "-schema.sql") ||
+      g_str_has_suffix(filename, "-schema-view.sql") ||
+      g_str_has_suffix(filename, "-schema-sequence.sql") ||
+      g_str_has_suffix(filename, "-schema-triggers.sql") ||
+      g_str_has_suffix(filename, "-schema-post.sql") ||
+      g_str_has_suffix(filename, "-schema-create.sql"))
+    return FALSE;
+  return TRUE;
+}
+
+void dbt_note_data_file_closed(struct db_table *dbt, const gchar *filename, guint64 size){
+  if (dbt == NULL || !is_data_restore_filename(filename))
+    return;
+  if (size == 0 && !build_empty_files)
+    return;
+  g_mutex_lock(dbt->chunks_mutex);
+  dbt->data_files++;
+  g_mutex_unlock(dbt->chunks_mutex);
+  metadata_partial_queue_push(dbt);
+}
+
+void dbt_note_data_files_complete(struct db_table *dbt){
+  if (dbt == NULL || dbt->data_files_complete)
+    return;
+  g_mutex_lock(dbt->chunks_mutex);
+  dbt->data_files_complete = TRUE;
+  g_mutex_unlock(dbt->chunks_mutex);
+  metadata_partial_queue_push(dbt);
+}

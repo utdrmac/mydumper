@@ -74,10 +74,13 @@ struct db_table {
   enum db_table_states status;
   guint max_threads_per_table;
   guint current_threads_running;
+  guint data_files;
+  gboolean data_files_complete;
 };
 
-#endif
 void initialize_table();
+void dbt_note_data_file_closed(struct db_table *dbt, const gchar *filename, guint64 size);
+void dbt_note_data_files_complete(struct db_table *dbt);
 void finalize_table();
 void prefetch_table_metadata(MYSQL *conn);
 void free_db_table(struct db_table * dbt);
@@ -85,3 +88,4 @@ gboolean new_db_table(struct db_table **d, MYSQL *conn, struct configuration *co
                       struct database *database, char *table, char *table_collation,
                       gboolean is_sequence, gboolean is_view);
 
+#endif

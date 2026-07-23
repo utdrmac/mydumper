@@ -778,6 +778,9 @@ void print_dbt_on_metadata_gstring(struct db_table *dbt, GString *data){
   gchar *lkey=build_dbt_key(dbt->database->database_name_in_filename, dbt->table_filename);
   g_string_append_printf(data,"\n[%s]\n", lkey);
   g_string_append_printf(data, "real_table_name=%s\nrows = %"G_GINT64_FORMAT"\n", table, dbt->rows);
+  g_string_append_printf(data, "data_files = %u\n", dbt->data_files);
+  if (dbt->data_files_complete)
+    g_string_append(data, "data_files_complete = 1\n");
   g_free(name);
   g_free(lkey);
   g_free(table);
@@ -1673,6 +1676,7 @@ void start_dump(struct configuration *conf, GOptionContext *context) {
   for (GList *it= keys; it; it= g_list_next(it)) {
     dbt= (struct db_table *) g_hash_table_lookup(all_dbts, it->data);
     g_assert(dbt);
+    dbt_note_data_files_complete(dbt);
     print_dbt_on_metadata(mdfile, dbt);
   }
   if (skip_metadata_sorting) {
