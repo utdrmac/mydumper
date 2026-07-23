@@ -29,6 +29,7 @@
 #include "myloader_stream.h"
 #include "myloader_common.h"
 #include "myloader_process.h"
+#include "stream_mem_budget.h"
 #include "myloader_control_job.h"
 #include "myloader_restore_job.h"
 #include "myloader_global.h"
@@ -56,14 +57,19 @@ static guint max_decompressors = 0;
 
 // Tracks memory-backed (fmemopen) streamed files so myl_close can free the
 // underlying buffer and release the stream memory budget.
-struct mem_open_entry { gchar *data; gsize len; };
+struct mem_open_entry {
+  gchar *data;
+  gsize len;
+  gboolean budget_charged;
+};
 static GHashTable *mem_open_table = NULL;
 static GMutex *mem_open_mutex = NULL;
 
-static void mem_open_track(FILE *f, gchar *data, gsize len){
+static void mem_open_track(FILE *f, gchar *data, gsize len, gboolean budget_charged){
   struct mem_open_entry *e = g_new0(struct mem_open_entry, 1);
   e->data = data;
   e->len = len;
+  e->budget_charged = budget_charged;
   g_mutex_lock(mem_open_mutex);
   if (mem_open_table == NULL)
     mem_open_table = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -71,7 +77,8 @@ static void mem_open_track(FILE *f, gchar *data, gsize len){
   g_mutex_unlock(mem_open_mutex);
 }
 
-static gboolean mem_open_untrack(FILE *f, gchar **data, gsize *len){
+static gboolean mem_open_untrack(FILE *f, gchar **data, gsize *len,
+                                 gboolean *budget_charged){
   gboolean found = FALSE;
   g_mutex_lock(mem_open_mutex);
   if (mem_open_table != NULL){
@@ -79,6 +86,8 @@ static gboolean mem_open_untrack(FILE *f, gchar **data, gsize *len){
     if (e){
       *data = e->data;
       *len = e->len;
+      if (budget_charged)
+        *budget_charged = e->budget_charged;
       g_hash_table_remove(mem_open_table, f);
       g_free(e);
       found = TRUE;
@@ -139,14 +148,16 @@ FILE * myl_open(char *filename, const char *type){
     gboolean found = stream_mem_get(base, &data, &len);
     g_free(base);
     if (found){
+      gboolean budget_charged = !stream_mem_budget_file_exempt(base);
       file = fmemopen(data, len, "r");
       if (file == NULL){
         g_free(data);
-        stream_mem_release_bytes(len);
+        if (budget_charged)
+          stream_mem_release_bytes(len);
         m_critical("fmemopen failed for streamed file %s", filename);
         return NULL;
       }
-      mem_open_track(file, data, len);
+      mem_open_track(file, data, len, budget_charged);
       return file;
     }
   }
@@ -254,10 +265,12 @@ void myl_close(const char *filename, FILE *file, gboolean rm){
   // Memory-backed streamed file: free the buffer and release the budget.
   gchar *mem_data = NULL;
   gsize mem_len = 0;
-  if (mem_open_untrack(file, &mem_data, &mem_len)){
+  gboolean budget_charged = FALSE;
+  if (mem_open_untrack(file, &mem_data, &mem_len, &budget_charged)){
     fclose(file);
     g_free(mem_data);
-    stream_mem_release_bytes(mem_len);
+    if (budget_charged)
+      stream_mem_release_bytes(mem_len);
     (void) rm;
     return;
   }
