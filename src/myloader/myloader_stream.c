@@ -27,6 +27,7 @@
 #include "myloader_control_job.h"
 #include "myloader_process_filename.h"
 #include "myloader_global.h"
+#include "stream_mem_budget.h"
 #include "../common_stream_protocol.h"
 
 GThread *stream_thread = NULL;
@@ -59,31 +60,12 @@ static gboolean stream_binary_active = FALSE;
 static GHashTable *stream_mem_files = NULL; /* basename -> struct stream_mem_file */
 static GMutex *stream_mem_mutex = NULL;
 
-/* Byte budget backpressure: the demux thread blocks before accumulating more
-   data once the in-flight bytes exceed the cap, throttling the sender over the
-   single pipe while bounding loader memory. */
-static gint64 stream_mem_bytes = 0;
-static guint64 stream_mem_cap = 512ULL * 1024 * 1024;
-static GMutex *stream_mem_budget_mutex = NULL;
-static GCond *stream_mem_budget_cond = NULL;
-
-static void stream_mem_budget_reserve(gsize len){
-  g_mutex_lock(stream_mem_budget_mutex);
-  while (stream_mem_bytes > 0 &&
-         stream_mem_bytes + (gint64)len > (gint64)stream_mem_cap)
-    g_cond_wait(stream_mem_budget_cond, stream_mem_budget_mutex);
-  stream_mem_bytes += (gint64)len;
-  g_mutex_unlock(stream_mem_budget_mutex);
-}
-
-void stream_mem_release_bytes(gsize len){
-  if (!stream_mem_budget_mutex)
-    return;
-  g_mutex_lock(stream_mem_budget_mutex);
-  stream_mem_bytes -= (gint64)len;
-  g_cond_broadcast(stream_mem_budget_cond);
-  g_mutex_unlock(stream_mem_budget_mutex);
-}
+/* Queued-file byte budget (MYLOADER_STREAM_BUDGET_MB, default 512 MiB): charged
+   when a completed data/.dat file enters stream_mem_files at FILE_CLOSE, released
+   when myl_close() finishes with the buffer. In-flight demux decompression buffers
+   are not charged, avoiding self-deadlock on large single-table streams. Schema,
+   metadata, and other control-plane files are exempt from the budget. See
+   stream_mem_budget.c. */
 
 gboolean stream_mem_active(void){
   return stream_binary_active;
@@ -126,16 +108,9 @@ void initialize_stream (struct configuration *c){
                "(nothing was piped in). Pipe a stream instead, e.g. "
                "`mydumper --stream ... | myloader --stream ...`.");
 
-  const gchar *budget_env = g_getenv("MYLOADER_STREAM_BUDGET_MB");
-  if (budget_env){
-    guint64 mb = g_ascii_strtoull(budget_env, NULL, 10);
-    if (mb)
-      stream_mem_cap = mb * 1024 * 1024;
-  }
+  stream_mem_budget_init_from_env();
   stream_mem_files = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
   stream_mem_mutex = g_mutex_new();
-  stream_mem_budget_mutex = g_mutex_new();
-  stream_mem_budget_cond = g_cond_new();
   /* Create the metadata-header sync primitives before starting the stream
      thread so it can safely signal them the instant it reaches EOF (avoids a
      latent startup race with the release guard below). */
@@ -594,8 +569,8 @@ static void demux_on_open(void *user, guint64 sid, const gchar *name,
         codec);
 }
 
-/* Decompress bytes into df->data via the file's codec, reserving budget on the
-   produced (uncompressed) bytes. */
+/* Decompress bytes into df->data via the file's codec. Budget is charged at
+   FILE_CLOSE when the completed file enters the in-memory registry. */
 static void demux_inflate_append(struct demux_file *df, const gchar *buf,
                                  gsize len){
   if (df->codec == MYD_CODEC_ZSTD){
@@ -607,10 +582,8 @@ static void demux_inflate_append(struct demux_file *df, const gchar *buf,
       if (ZSTD_isError(ret))
         m_critical("Stream: zstd decompress failed for %s: %s", df->name,
                    ZSTD_getErrorName(ret));
-      if (o.pos){
-        stream_mem_budget_reserve(o.pos);
+      if (o.pos)
         g_string_append_len(df->data, (gchar *)out, o.pos);
-      }
       if (o.pos == 0 && in.pos == in.size)
         break;
     }
@@ -627,10 +600,8 @@ static void demux_inflate_append(struct demux_file *df, const gchar *buf,
         ret == Z_NEED_DICT)
       m_critical("Stream: inflate failed for %s (%d)", df->name, ret);
     gsize produced = sizeof(out) - df->zs->avail_out;
-    if (produced){
-      stream_mem_budget_reserve(produced);
+    if (produced)
       g_string_append_len(df->data, (gchar *)out, produced);
-    }
   } while (df->zs->avail_out == 0);
 }
 
@@ -643,12 +614,10 @@ static void demux_on_data(void *user, guint64 sid, const gchar *buf,
     g_critical("Stream data for unknown id %" G_GUINT64_FORMAT, sid);
     return;
   }
-  if (df->compressed){
+  if (df->compressed)
     demux_inflate_append(df, buf, len);
-  }else{
-    stream_mem_budget_reserve(len);
+  else
     g_string_append_len(df->data, buf, len);
-  }
 }
 
 static void demux_on_close(void *user, guint64 sid, guint64 total,
@@ -697,10 +666,12 @@ static void demux_on_close(void *user, guint64 sid, guint64 total,
                  gerror ? gerror->message : "unknown");
     g_free(path);
     g_free(bytes);
-    stream_mem_release_bytes(len);
   }else{
     /* Bulk data / schema / .dat: served from memory by myl_open / the LOAD
-       DATA local-infile handler. */
+       DATA local-infile handler. Control-plane files are exempt from budget
+       backpressure so the demux thread never blocks waiting for loaders. */
+    if (!stream_mem_budget_file_exempt(df->name))
+      stream_mem_budget_charge(len);
     stream_mem_put(df->name, bytes, len);
   }
   process_filename_push(df->name);
