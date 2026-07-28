@@ -130,7 +130,7 @@ INSTALL(TARGETS mydumper myloader
   RUNTIME DESTINATION bin
 )
 
-INSTALL(FILES mydumper.cnf
+INSTALL(FILES mydumper.cnf myloader.cnf
   DESTINATION /etc
   COMPONENT config
 )
@@ -169,6 +169,9 @@ add_test(NAME stream_budget COMMAND test_stream_budget)
 add_executable(test_progress_metadata test/unit/test_progress_metadata.c)
 add_test(NAME progress_metadata COMMAND test_progress_metadata)
 
+add_test(NAME myloader_aws_session
+  COMMAND ${CMAKE_SOURCE_DIR}/test/test_myloader_aws_session.sh $<TARGET_FILE:myloader>)
+
 IF(RUN_CPPCHECK)
   include(CppcheckTargets)
   add_cppcheck(mydumper)
@@ -203,6 +206,4 @@ MESSAGE(STATUS)
 #foreach (_variableName ${_variableNames})
 #    message(STATUS "${_variableName}=${${_variableName}}")
 #endforeach()
-
-
 
