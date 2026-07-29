@@ -1180,7 +1180,7 @@ void update_string_where_on_gstring(GString *where, gboolean include_null, GStri
   if (prefix && prefix->len>0)
     g_string_append(where,")");
 
-    g_free(upper_bound);
+  g_free(upper_bound);
   g_free(escaped_min);
   g_free(escaped_max);
   g_free(escaped_upper_bound);
