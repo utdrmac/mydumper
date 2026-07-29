@@ -33,7 +33,6 @@
 #include "myloader_worker_loader.h"
 #include "myloader_worker_index.h"
 #include "myloader_database.h"
-#include "myloader_table.h"
 
 unsigned long long int total_data_sql_files = 0;
 gboolean shutdown_triggered=FALSE;
@@ -443,14 +442,12 @@ int process_restore_job(struct thread_data *td, struct restore_job *rj){
           g_mutex_lock(progress_mutex);
           progress++;
           get_total_done(td->conf, &total);
-          guint part_total = dbt_part_total(dbt);
-          guint progress_total = global_data_files_total(td->conf);
           if (machine_log_json) {
             gchar *thread_id = g_strdup_printf("%u", td->thread_id);
             gchar *part_index = g_strdup_printf("%u", rj->data.drj->index);
-            gchar *part_total_str = g_strdup_printf("%u", part_total);
+            gchar *part_total = g_strdup_printf("%u", dbt->count);
             gchar *progress_value = g_strdup_printf("%llu", (unsigned long long)progress);
-            gchar *progress_total_str = g_strdup_printf("%u", progress_total);
+            gchar *progress_total = g_strdup_printf("%llu", (unsigned long long)total_data_sql_files);
             gchar *tables_done = g_strdup_printf("%u", total);
             gchar *tables_total = g_strdup_printf("%u", g_hash_table_size(td->conf->table_hash));
             machine_log_event(G_LOG_DOMAIN, G_LOG_LEVEL_MESSAGE,
@@ -463,22 +460,22 @@ int process_restore_job(struct thread_data *td, struct restore_job *rj){
                              "TABLE", dbt->source_table_name,
                              "FILENAME", rj->filename,
                              "PART_INDEX", part_index,
-                             "PART_TOTAL", part_total_str,
+                             "PART_TOTAL", part_total,
                              "PROGRESS_VALUE", progress_value,
-                             "PROGRESS_TOTAL", progress_total_str,
+                             "PROGRESS_TOTAL", progress_total,
                              "TABLES_DONE", tables_done,
                              "TABLES_TOTAL", tables_total,
                              NULL);
             g_free(thread_id);
             g_free(part_index);
-            g_free(part_total_str);
+            g_free(part_total);
             g_free(progress_value);
-            g_free(progress_total_str);
+            g_free(progress_total);
             g_free(tables_done);
             g_free(tables_total);
           } else {
-            message("Thread %d: restoring %s.%s part %d of %d from %s | Progress %llu of %u. Tables %d of %d completed", td->thread_id,
-                      dbt->database->target_database, dbt->source_table_name, rj->data.drj->index, part_total, rj->filename, progress, progress_total, total , g_hash_table_size(td->conf->table_hash));
+            message("Thread %d: restoring %s.%s part %d of %d from %s | Progress %llu of %llu. Tables %d of %d completed", td->thread_id,
+                      dbt->database->target_database, dbt->source_table_name, rj->data.drj->index, dbt->count, rj->filename, progress,total_data_sql_files, total , g_hash_table_size(td->conf->table_hash));
           }
           g_mutex_unlock(progress_mutex);
           if (restore_data_from_file(td, rj->filename, FALSE, dbt->database) > 0){

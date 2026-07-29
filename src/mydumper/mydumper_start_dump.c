@@ -1691,7 +1691,6 @@ void start_dump(struct configuration *conf, GOptionContext *context) {
   for (GList *it= keys; it; it= g_list_next(it)) {
     dbt= (struct db_table *) g_hash_table_lookup(all_dbts, it->data);
     g_assert(dbt);
-    dbt_note_data_files_complete(dbt);
     print_dbt_on_metadata(mdfile, dbt);
   }
   if (skip_metadata_sorting) {

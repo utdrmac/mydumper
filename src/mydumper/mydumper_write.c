@@ -28,7 +28,6 @@
 #include "mydumper_common.h"
 #include "mydumper_jobs.h"
 #include "mydumper_database.h"
-#include "mydumper_table.h"
 #include "mydumper_working_thread.h"
 #include "mydumper_write.h"
 #include "mydumper_masquerade.h"
@@ -823,7 +822,6 @@ void flush_dbt_rows(struct thread_data *td){
 static
 void close_file(struct table_job * tj, struct table_job_file *tjf){
   if (tjf->file >= 0){
-    dbt_note_data_file_closed(tj->dbt, tjf->filename, tj->filesize);
     m_close(tj->td->thread_id, tjf->file, tjf->filename, tj->filesize, tj->dbt);
     tjf->file=-1;
     g_free(tjf->filename);

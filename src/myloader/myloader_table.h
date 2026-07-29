@@ -53,9 +53,12 @@ struct db_table {
   gboolean is_sequence;
   // O(1) ready queue flag: prevents duplicate enqueuing
   gboolean in_ready_queue;
+<<<<<<< HEAD
   guint data_files_reported;
   guint data_files_estimated_reported;
   gboolean data_files_complete;
+=======
+>>>>>>> parent of 96544606 (better estimate of part numbers)
 };
 
 struct db_table * get_table(gchar *database_name_in_filename , gchar * table_filename);
@@ -66,6 +69,4 @@ gint compare_dbt_short(gconstpointer a, gconstpointer b);
 void initialize_table(struct configuration *c);
 void table_lock(struct db_table *dbt);
 void table_unlock(struct db_table *dbt);
-guint dbt_part_total(struct db_table *dbt);
-guint global_data_files_total(struct configuration *conf);
 #endif

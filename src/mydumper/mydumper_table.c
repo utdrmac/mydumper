@@ -25,7 +25,6 @@
 #include "mydumper_global.h"
 #include "mydumper_chunks.h"
 #include "mydumper_common.h"
-#include "mydumper_stream.h"
 
 // Extern
 extern guint64 min_integer_chunk_step_size;
@@ -538,8 +537,6 @@ gboolean new_db_table(struct db_table **d, MYSQL *conn, struct configuration *co
     c=GPOINTER_TO_INT(m_coalesce_hash(g_hash_table_lookup(conf_per_table,SKIP_DATA_CHECKSUMS), config_file_dbt_key, any_db_config_file_dbt_key, any_table_config_file_dbt_key));
     dbt->checksum.skip_data=    c?c:(data_checksums?skip_data_checksums:TRUE);
     dbt->rows=0;
-    dbt->data_files=0;
-    dbt->data_files_complete=FALSE;
  // dbt->chunk_functions.process=NULL;
     b=TRUE;
     g_free(config_file_dbt_key);

@@ -28,7 +28,6 @@
 #include "mydumper_arguments.h"
 #include "mydumper_create_jobs.h"
 #include "mydumper_chunks.h"
-#include "mydumper_table.h"
 //
 // Enqueueing in initial_queue
 //
@@ -242,18 +241,14 @@ struct table_job * new_table_job(struct db_table *dbt, char *partition, guint64 
 
 void free_table_job(struct table_job *tj){
   if (tj->sql && tj->sql->file >= 0){
-    if (tj->sql->file >= 0){
-      dbt_note_data_file_closed(tj->dbt, tj->sql->filename, tj->filesize);
+    if (tj->sql->file >= 0)
       m_close(tj->td->thread_id, tj->sql->file, tj->sql->filename, tj->filesize, tj->dbt);
-    }
     tj->sql->file=-1;
     tj->sql=NULL;
   }
   if (tj->rows){
-    if (tj->rows->file >= 0){
-      dbt_note_data_file_closed(tj->dbt, tj->rows->filename, tj->filesize);
+    if (tj->rows->file >= 0)
       m_close(tj->td->thread_id, tj->rows->file, tj->rows->filename, tj->filesize, tj->dbt);
-    }
     tj->rows->file=-1;
     tj->rows=NULL;
   }

@@ -824,10 +824,8 @@ void process_metadata_global_filename(gchar *file, GOptionContext * local_contex
             ++sequences;
           }
           if (value) g_free(value);
-          value=get_value(kf,groups[j],ROWS);
-          if (value){
-            dbt->rows=g_ascii_strtoull(value,NULL, 10);
-            g_free(value);
+          if (get_value(kf,groups[j],ROWS)){
+            dbt->rows=g_ascii_strtoull(get_value(kf,groups[j],ROWS),NULL, 10);
           }
           value=get_value(kf,groups[j],DATA_FILES);
           if (value){
