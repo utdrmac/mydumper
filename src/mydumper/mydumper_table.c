@@ -541,6 +541,8 @@ void dbt_note_data_file_closed(struct db_table *dbt, const gchar *filename, guin
   dbt->data_files++;
   g_mutex_unlock(dbt->chunks_mutex);
   metadata_partial_queue_push(dbt);
+  if (stream)
+    stream_push_table_metadata_partial(dbt);
 }
 
 void dbt_note_data_files_complete(struct db_table *dbt){
