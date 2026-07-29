@@ -53,12 +53,9 @@ struct db_table {
   gboolean is_sequence;
   // O(1) ready queue flag: prevents duplicate enqueuing
   gboolean in_ready_queue;
-<<<<<<< HEAD
   guint data_files_reported;
   guint data_files_estimated_reported;
   gboolean data_files_complete;
-=======
->>>>>>> parent of 96544606 (better estimate of part numbers)
 };
 
 struct db_table * get_table(gchar *database_name_in_filename , gchar * table_filename);
