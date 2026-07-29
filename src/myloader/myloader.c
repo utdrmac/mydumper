@@ -550,8 +550,6 @@ int main(int argc, char *argv[]) {
       g_hash_table_remove(set_session_hash, "SQL_LOG_BIN");
     }
   }
-//	initialize_conf_per_table(&conf_per_table);
-//  conf_per_table=g_hash_table_new ( g_str_hash, g_str_equal );
   load_per_table_info_from_key_file(key_file, conf_per_table, NULL );
   if (max_transaction_size == DEFAULT_MAX_TRANSACTION_SIZE)
     detect_group_replication_transaction_size_limit(conn);
