@@ -62,6 +62,7 @@
 #define WHERE "where"
 #define ROWS "rows"
 #define DATA_FILES "data_files"
+#define DATA_FILES_ESTIMATED "data_files_estimated"
 #define DATA_FILES_COMPLETE "data_files_complete"
 #define NUM_THREADS "num_threads"
 #define COLUMNS_ON_SELECT         "columns_on_select"

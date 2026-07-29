@@ -809,18 +809,14 @@ void process_metadata_global_filename(gchar *file, GOptionContext * local_contex
             continue;
           }
           value=get_value(kf,groups[j],"is_view");
-          append_new_db_table(&dbt, _database, real_table_name, database_table[1], value && g_ascii_strtoull(value,NULL, 10) == 1 );//, real_table_name);//,0,NULL);
-//          if (real_table_name) g_free(real_table_name);
-  //        if (table_filename) g_free(table_filename);
+          append_new_db_table(&dbt, _database, real_table_name, database_table[1], value && g_ascii_strtoull(value,NULL, 10) == 1 );
+
           real_table_name=NULL;
           dbt->checksum.data=   get_value(kf,groups[j],"data_checksum");
           dbt->checksum.schema= get_value(kf,groups[j],"schema_checksum");
           dbt->checksum.index=  get_value(kf,groups[j],"indexes_checksum");
           dbt->checksum.trigger=get_value(kf,groups[j],"triggers_checksum");
-/*          value=get_value(kf,groups[j],"is_view");
-          if (value != NULL && g_strcmp0(value,"1")==0){
-            dbt->is_view=TRUE;
-          } */
+
           if (value) g_free(value);
           value=get_value(kf, groups[j], "is_sequence");
           if (value != NULL && g_strcmp0(value, "1") == 0){
@@ -840,13 +836,20 @@ void process_metadata_global_filename(gchar *file, GOptionContext * local_contex
               dbt->data_files_reported=reported;
             g_free(value);
           }
+          value=get_value(kf,groups[j],DATA_FILES_ESTIMATED);
+          if (value){
+            guint estimated=g_ascii_strtoull(value,NULL, 10);
+            if (estimated > dbt->data_files_estimated_reported)
+              dbt->data_files_estimated_reported=estimated;
+            g_free(value);
+          }
           value=get_value(kf,groups[j],DATA_FILES_COMPLETE);
-          if (value != NULL && g_strcmp0(value,"1")==0)
+          if (value != NULL && g_strcmp0(value,"1")==0){
             dbt->data_files_complete=TRUE;
+            if (dbt->data_files_reported > dbt->data_files_estimated_reported)
+              dbt->data_files_estimated_reported=dbt->data_files_reported;
+          }
           if (value) g_free(value);
-/*          if (get_value(kf,groups[j],"is_view")){
-            dbt->is_view=g_ascii_strtoull(get_value(kf,groups[j],"is_view"),NULL, 10);
-          }*/
         }
       } else {
         database_table[0][strlen(database_table[0])-1]='\0';

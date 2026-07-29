@@ -54,6 +54,7 @@ struct db_table {
   // O(1) ready queue flag: prevents duplicate enqueuing
   gboolean in_ready_queue;
   guint data_files_reported;
+  guint data_files_estimated_reported;
   gboolean data_files_complete;
 };
 

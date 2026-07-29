@@ -9,10 +9,17 @@
 #include <string.h>
 
 #define DATA_FILES "data_files"
+#define DATA_FILES_ESTIMATED "data_files_estimated"
 #define DATA_FILES_COMPLETE "data_files_complete"
 
-static unsigned part_total(unsigned local_count, unsigned metadata_reported){
-  return metadata_reported > local_count ? metadata_reported : local_count;
+static unsigned part_total(unsigned local_count, unsigned metadata_reported,
+                         unsigned metadata_estimated){
+  unsigned total = local_count;
+  if (metadata_reported > total)
+    total = metadata_reported;
+  if (metadata_estimated > total)
+    total = metadata_estimated;
+  return total;
 }
 
 static unsigned global_total(unsigned local_total, unsigned metadata_sum){
@@ -38,9 +45,10 @@ static const char *find_key_value(const char *data, const char *key){
 
 static void test_part_total_prefers_metadata(void){
   fprintf(stderr, "test_part_total_prefers_metadata\n");
-  assert_equal_u("metadata ahead of local", part_total(5, 27), 27);
-  assert_equal_u("local ahead of metadata", part_total(30, 27), 30);
-  assert_equal_u("equal counts", part_total(10, 10), 10);
+  assert_equal_u("metadata ahead of local", part_total(5, 27, 0), 27);
+  assert_equal_u("estimate ahead of local", part_total(5, 5, 50), 50);
+  assert_equal_u("local ahead of metadata", part_total(30, 27, 25), 30);
+  assert_equal_u("equal counts", part_total(10, 10, 10), 10);
 }
 
 static void test_global_total_prefers_metadata_sum(void){
@@ -56,8 +64,10 @@ static void test_metadata_key_parsing(void){
       "real_table_name=table\n"
       "rows = 1000\n"
       "data_files = 27\n"
+      "data_files_estimated = 50\n"
       "data_files_complete = 1\n";
   const char *files = find_key_value(data, DATA_FILES);
+  const char *estimated = find_key_value(data, DATA_FILES_ESTIMATED);
   const char *complete = find_key_value(data, DATA_FILES_COMPLETE);
 
   if (files == NULL){
@@ -65,6 +75,11 @@ static void test_metadata_key_parsing(void){
     exit(1);
   }
   assert_equal_u("data_files parsed", (unsigned)strtoul(files, NULL, 10), 27);
+  if (estimated == NULL){
+    fprintf(stderr, "  FAIL [data_files_estimated missing]\n");
+    exit(1);
+  }
+  assert_equal_u("data_files_estimated parsed", (unsigned)strtoul(estimated, NULL, 10), 50);
   if (complete == NULL || strncmp(complete, "1", 1) != 0){
     fprintf(stderr, "  FAIL [data_files_complete expected 1]\n");
     exit(1);

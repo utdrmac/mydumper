@@ -154,6 +154,7 @@ gboolean append_new_db_table( struct db_table **p_dbt, struct database *_databas
       dbt->is_sequence=FALSE;
       dbt->in_ready_queue=FALSE;
       dbt->data_files_reported=0;
+      dbt->data_files_estimated_reported=0;
       dbt->data_files_complete=FALSE;
     }else{
       if (is_view){
@@ -189,7 +190,12 @@ void table_unlock(struct db_table *dbt){
 }
 
 guint dbt_part_total(struct db_table *dbt){
-  return dbt->data_files_reported > dbt->count ? dbt->data_files_reported : dbt->count;
+  guint total = dbt->count;
+  if (dbt->data_files_reported > total)
+    total = dbt->data_files_reported;
+  if (dbt->data_files_estimated_reported > total)
+    total = dbt->data_files_estimated_reported;
+  return total;
 }
 
 guint global_data_files_total(struct configuration *conf){
