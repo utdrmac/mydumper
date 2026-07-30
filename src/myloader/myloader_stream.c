@@ -27,7 +27,7 @@
 #include "myloader_control_job.h"
 #include "myloader_process_filename.h"
 #include "myloader_global.h"
-#include "stream_mem_budget.h"
+#include "myloader_stream_mem_budget.h"
 #include "../common_stream_protocol.h"
 
 GThread *stream_thread = NULL;
@@ -60,12 +60,12 @@ static gboolean stream_binary_active = FALSE;
 static GHashTable *stream_mem_files = NULL; /* basename -> struct stream_mem_file */
 static GMutex *stream_mem_mutex = NULL;
 
-/* Queued-file byte budget (MYLOADER_STREAM_BUDGET_MB, default 512 MiB): charged
+/* Queued-file byte budget (--stream-budget-mb, default 512 MiB): charged
    when a completed data/.dat file enters stream_mem_files at FILE_CLOSE, released
    when myl_close() finishes with the buffer. In-flight demux decompression buffers
    are not charged, avoiding self-deadlock on large single-table streams. Schema,
    metadata, and other control-plane files are exempt from the budget. See
-   stream_mem_budget.c. */
+   myloader_stream_mem_budget.c. */
 
 gboolean stream_mem_active(void){
   return stream_binary_active;
@@ -108,7 +108,7 @@ void initialize_stream (struct configuration *c){
                "(nothing was piped in). Pipe a stream instead, e.g. "
                "`mydumper --stream ... | myloader --stream ...`.");
 
-  stream_mem_budget_init_from_env();
+  stream_mem_budget_init();
   stream_mem_files = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
   stream_mem_mutex = g_mutex_new();
   /* Create the metadata-header sync primitives before starting the stream

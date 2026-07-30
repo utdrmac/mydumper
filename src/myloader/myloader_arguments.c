@@ -24,6 +24,7 @@
 #include "myloader.h"
 #include "myloader_global.h"
 #include "myloader_arguments.h"
+#include "myloader_stream_mem_budget.h"
 
 gchar *optimize_keys_str=NULL;
 gchar *checksum_str=NULL;
@@ -154,6 +155,15 @@ gboolean arguments_callback(const gchar *option_name,const gchar *value, gpointe
   } else if (!g_strcmp0(option_name, "--aws-session-command")) {
     aws_session_command_append(value);
     return TRUE;
+  } else if (!g_strcmp0(option_name, "--stream-budget-mb")) {
+    if (value == NULL)
+      return FALSE;
+    stream_budget_mb = (guint)g_ascii_strtoull(value, NULL, 10);
+    if (stream_budget_mb == 0)
+      stream_budget_mb = MYLOADER_STREAM_BUDGET_DEFAULT_MB;
+    stream_budget_mb_user_set = TRUE;
+    stream_mem_budget_set_cap_mb(stream_budget_mb);
+    return TRUE;
   }
   
   return common_arguments_callback(option_name, value, data, error);
@@ -239,6 +249,10 @@ static GOptionEntry execution_entries[] = {
       "Receive the backup from STDIN using the mydumper<->myloader binary "
       "protocol (produced by 'mydumper --stream') and restore it. Takes no "
       "value", NULL},
+    {"stream-budget-mb", 0, 0, G_OPTION_ARG_CALLBACK, &arguments_callback,
+      "Maximum megabytes of completed stream files queued in memory during "
+      "--stream restore (default 512). Raise when using many loader threads "
+      "with large chunk files.", NULL},
     {"metadata-refresh-interval", 0, 0, G_OPTION_ARG_INT, &refresh_table_list_interval, 
       "Every this amount of tables the internal metadata will be refreshed. "
       "If the amount of tables you have in your metadata file is high, then you should increase this value. Default: 100", NULL},

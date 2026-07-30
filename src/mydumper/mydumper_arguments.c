@@ -27,6 +27,7 @@
 #include "mydumper_arguments.h"
 #include "mydumper_common.h"
 #include "mydumper_string_planner.h"
+#include "mydumper_stream.h"
 
 extern guint64 min_integer_chunk_step_size;
 extern guint64 max_integer_chunk_step_size;
@@ -219,6 +220,15 @@ gboolean arguments_callback(const gchar *option_name,const gchar *value, gpointe
     g_strfreev(value_split);
     return TRUE;
   }
+  if (!g_strcmp0(option_name, "--stream-budget-mb")) {
+    if (value == NULL)
+      return FALSE;
+    stream_budget_mb = (guint)g_ascii_strtoull(value, NULL, 10);
+    if (stream_budget_mb == 0)
+      stream_budget_mb = MYDUMPER_STREAM_BUDGET_DEFAULT_MB;
+    stream_budget_mb_user_set = TRUE;
+    return TRUE;
+  }
 
   return common_arguments_callback(option_name, value, data, error);
 }
@@ -237,6 +247,9 @@ static GOptionEntry entries[] = {
       "Stream the backup over STDOUT using the mydumper<->myloader binary "
       "protocol (consume it with 'myloader --stream'). Takes no value; to save "
       "the backup to disk, redirect stdout to a file", NULL},
+    {"stream-budget-mb", 0, 0, G_OPTION_ARG_CALLBACK, &arguments_callback,
+      "Maximum megabytes of stream data in flight on the wire during "
+      "--stream dump (default 256)", NULL},
     {"logfile", 'L', 0, G_OPTION_ARG_FILENAME, &logfile,
       "Log file name to use, by default stderr is used", NULL},
     {"disk-limits", 0, 0, G_OPTION_ARG_STRING, &disk_limits,

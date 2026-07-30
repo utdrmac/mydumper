@@ -1174,6 +1174,11 @@ void start_dump(struct configuration *conf, GOptionContext *context) {
   fprintf(mdfile, "[config]\nquote-character = %s\n", qc);
   if (load_data || csv )
     fprintf(mdfile, "local-infile = 1\n");
+  if (stream){
+    fprintf(mdfile, "chunk-size = %u\n", chunk_filesize);
+    fprintf(mdfile, "mydumper-stream-budget-mb = %u\n",
+            mydumper_stream_budget_mb_effective());
+  }
   fprintf(mdfile, "\n[myloader_session_variables]");
   fprintf(mdfile, "\nSQL_MODE=%s /*!40101\n", sql_mode);
   fflush(mdfile);

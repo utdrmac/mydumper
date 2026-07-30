@@ -29,7 +29,7 @@
 #include "myloader_stream.h"
 #include "myloader_common.h"
 #include "myloader_process.h"
-#include "stream_mem_budget.h"
+#include "myloader_stream_mem_budget.h"
 #include "myloader_control_job.h"
 #include "myloader_restore_job.h"
 #include "myloader_global.h"
@@ -678,6 +678,55 @@ gboolean process_table_filename(char * filename){
 
 gboolean first_metadata_processed=FALSE;
 
+/**
+ * Check if the key in the metadata config is a valid key for option parsing (TRUE)
+ * or only used for other metadata processing (FALSE).
+ */
+static gboolean metadata_config_key_for_option_parse(const gchar *key){
+  if (key == NULL)
+    return TRUE;
+  /**
+   * Provided by mydumper; used to warn if the chunk-size/budget cannot support the 
+   * number of requested threads (myloader --threads / --max-threads-per-table).
+   */
+  if (!g_strcmp0(key, "chunk-size")) 
+    return FALSE;
+  if (!g_strcmp0(key, "mydumper-stream-budget-mb"))
+    return FALSE;
+  return TRUE;
+}
+
+static void apply_stream_budget_from_dump_metadata(GKeyFile *kf){
+  GError *error = NULL;
+  gchar *chunk_size_val = NULL;
+  gchar *dump_budget_val = NULL;
+  guint dump_chunk_size_mb = 0;
+  guint dump_stream_budget_mb = 0;
+
+  if (!stream || !g_key_file_has_group(kf, CONFIG))
+    return;
+
+  chunk_size_val = g_key_file_get_value(kf, CONFIG, "chunk-size", &error);
+  if (error){
+    g_clear_error(&error);
+    error = NULL;
+  }
+  dump_budget_val = g_key_file_get_value(kf, CONFIG, "mydumper-stream-budget-mb", &error);
+  if (error)
+    g_clear_error(&error);
+
+  if (chunk_size_val)
+    dump_chunk_size_mb = (guint)g_ascii_strtoull(chunk_size_val, NULL, 10);
+  if (dump_budget_val)
+    dump_stream_budget_mb = (guint)g_ascii_strtoull(dump_budget_val, NULL, 10);
+
+  g_free(chunk_size_val);
+  g_free(dump_budget_val);
+
+  stream_mem_budget_adjust_for_dump(dump_chunk_size_mb, dump_stream_budget_mb,
+                                    num_threads, max_threads_per_table);
+}
+
 void process_metadata_global_filename(gchar *file, GOptionContext * local_context, gboolean is_global)
 {
   set_thread_name("MDT");
@@ -719,11 +768,14 @@ void process_metadata_global_filename(gchar *file, GOptionContext * local_contex
       }else{
         // Transform the key-value pair to parameters option that the parsing will understand
         for (i=0; i < len; i++){
+          if (!metadata_config_key_for_option_parse(keys[i]))
+            continue;
           list = g_slist_append(list, g_strdup_printf("--%s",keys[i]));
           value=g_key_file_get_value(kf,CONFIG,keys[i],&error);
           if ( value != NULL ) list=g_slist_append(list, value);
         }
         gint slen = g_slist_length(list) + 1;
+        gboolean parse_config = slen > 1;
         gchar ** gclist = g_new0(gchar *, slen);
         GSList *ilist=list;
         gint j2=0;
@@ -733,10 +785,12 @@ void process_metadata_global_filename(gchar *file, GOptionContext * local_contex
         }
         g_slist_free(list);
         // Second parse over the options
-        if (!g_option_context_parse(local_context, &slen, &gclist, &error)) {
-          m_critical("option parsing failed: %s, try --help\n", error->message);
-        }else{
-          trace("Config file loaded");
+        if (parse_config){
+          if (!g_option_context_parse(local_context, &slen, &gclist, &error)) {
+            m_critical("option parsing failed: %s, try --help\n", error->message);
+          }else{
+            trace("Config file loaded");
+          }
         }
         g_strfreev(gclist);
       }
@@ -755,6 +809,7 @@ void process_metadata_global_filename(gchar *file, GOptionContext * local_contex
       }
       trace("metadata: quote character is %c", identifier_quote_character);
       first_metadata_processed=TRUE;
+      apply_stream_budget_from_dump_metadata(kf);
     }else{
       m_error("Section [config] was not found on metadata file: %s", file);
     }

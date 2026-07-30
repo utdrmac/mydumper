@@ -57,7 +57,10 @@ GAsyncQueue * initial_metadata_queue = NULL;
 
 gboolean stream_use_binary = FALSE;
 static gboolean stream_compress = FALSE; /* in-process deflate of DATA payloads */
-guint64 stream_budget_cap = 256ULL * 1024 * 1024; /* default 256 MB in flight */
+guint stream_budget_mb = 256;
+gboolean stream_budget_mb_user_set = FALSE;
+
+static guint64 stream_budget_cap = 256ULL * 1024 * 1024; /* default 256 MB in flight */
 
 #define STREAM_DEFLATE_CHUNK 65536
 
@@ -682,13 +685,10 @@ void initialize_stream(){
   stream_use_binary = stream && !is_pipe_backup();
 
   if (stream_use_binary){
-    /* Tunable in-flight memory budget (backpressure). */
-    const gchar *budget_env = g_getenv("MYDUMPER_STREAM_BUDGET_MB");
-    if (budget_env){
-      guint64 mb = g_ascii_strtoull(budget_env, NULL, 10);
-      if (mb)
-        stream_budget_cap = mb * 1024 * 1024;
-    }
+    if (stream_budget_mb_user_set)
+      stream_budget_cap = (guint64)stream_budget_mb * 1024 * 1024;
+    else
+      stream_budget_cap = (guint64)MYDUMPER_STREAM_BUDGET_DEFAULT_MB * 1024 * 1024;
     /* --compress enables in-process (zlib) compression of the stream,
        self-describing via the per-file COMPRESSED flag so the loader handles it
        automatically. The specific codec (GZIP/ZSTD) only affects on-disk files;
@@ -710,6 +710,12 @@ void initialize_stream(){
     stream_thread = m_thread_new("stream", (GThreadFunc)process_stream, stream_queue, "Stream thread could not be created");
   }
   metadata_partial_writer_thread = m_thread_new("metadata_writer", (GThreadFunc)metadata_partial_writer, NULL, "Metadata partial writer thread could not be created");
+}
+
+guint mydumper_stream_budget_mb_effective(void){
+  if (stream_budget_mb_user_set)
+    return stream_budget_mb;
+  return MYDUMPER_STREAM_BUDGET_DEFAULT_MB;
 }
 
 void wait_stream_to_finish(){

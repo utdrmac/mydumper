@@ -15,6 +15,7 @@
         Authors:    David Ducos, Percona (david dot ducos at percona dot com)
 */
 #define METADATA_PARTIAL_INTERVAL 2
+#define MYDUMPER_STREAM_BUDGET_DEFAULT_MB 256U
 void initialize_stream();
 void *process_binary_stream(void *data);
 void wait_stream_to_finish();
@@ -22,3 +23,7 @@ void metadata_partial_queue_push(struct db_table *dbt);
 void stream_queue_push(struct db_table *dbt,gchar *filename);
 guint get_stream_queue_length();
 void send_initial_metadata();
+guint mydumper_stream_budget_mb_effective(void);
+
+extern guint stream_budget_mb;
+extern gboolean stream_budget_mb_user_set;
