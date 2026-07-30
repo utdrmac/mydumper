@@ -153,9 +153,6 @@ gboolean append_new_db_table( struct db_table **p_dbt, struct database *_databas
       dbt->is_view=FALSE;
       dbt->is_sequence=FALSE;
       dbt->in_ready_queue=FALSE;
-      dbt->data_files_reported=0;
-      dbt->data_files_estimated_reported=0;
-      dbt->data_files_complete=FALSE;
     }else{
       if (is_view){
         dbt->is_view=TRUE;
@@ -187,28 +184,6 @@ void table_lock(struct db_table *dbt){
 void table_unlock(struct db_table *dbt){
   trace("table_unlock:: %s %s", dbt->database->target_database, dbt->source_table_name);
   g_mutex_unlock(dbt->mutex);
-}
-
-guint dbt_part_total(struct db_table *dbt){
-  guint total = dbt->count;
-  if (dbt->data_files_reported > total)
-    total = dbt->data_files_reported;
-  if (dbt->data_files_estimated_reported > total)
-    total = dbt->data_files_estimated_reported;
-  return total;
-}
-
-guint global_data_files_total(struct configuration *conf){
-  guint sum = 0;
-  g_mutex_lock(conf->table_hash_mutex);
-  GHashTableIter iter;
-  gpointer key, value;
-  g_hash_table_iter_init(&iter, conf->table_hash);
-  while (g_hash_table_iter_next(&iter, &key, &value)){
-    sum += dbt_part_total((struct db_table *)value);
-  }
-  g_mutex_unlock(conf->table_hash_mutex);
-  return sum > total_data_sql_files ? sum : total_data_sql_files;
 }
 
 void free_dbt(struct db_table * dbt){

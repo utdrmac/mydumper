@@ -74,8 +74,6 @@ struct db_table {
   enum db_table_states status;
   guint max_threads_per_table;
   guint current_threads_running;
-  guint data_files;
-  gboolean data_files_complete;
   guint64 string_planner_started_us;
   gint64 string_planner_deadline_us;
   guint string_planner_probe_count;

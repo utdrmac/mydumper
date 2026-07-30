@@ -476,31 +476,6 @@ void metadata_partial_queue_push (struct db_table *dbt){
     g_async_queue_push(metadata_partial_queue, dbt);
 }
 
-/* Push a single-table metadata.partial snapshot into the stream immediately.
-   Used on each data-file close so myloader sees dump-side totals (and row-based
-   estimates) without waiting for the 2s metadata_partial_writer interval. */
-void stream_push_table_metadata_partial(struct db_table *dbt){
-  if (!stream || dbt == NULL)
-    return;
-  GString *output = g_string_sized_new(256);
-  print_dbt_on_metadata_gstring(dbt, output);
-  static gint stream_partial_seq = 0;
-  gchar *filename = g_strdup_printf("%s/metadata.partial.%d", dump_directory,
-      g_atomic_int_add(&stream_partial_seq, 1) + 1000000);
-  GError *gerror = NULL;
-  if (!g_file_set_contents(filename, output->str, output->len, &gerror)){
-    g_warning("Stream: could not write %s: %s", filename,
-              gerror ? gerror->message : "unknown");
-    if (gerror)
-      g_error_free(gerror);
-    g_string_free(output, TRUE);
-    g_free(filename);
-    return;
-  }
-  g_string_free(output, TRUE);
-  stream_queue_push(NULL, filename);
-}
-
 guint get_stream_queue_length(){
   if (stream_use_binary)
     return stream_msg_queue ? g_async_queue_length(stream_msg_queue) : 0;

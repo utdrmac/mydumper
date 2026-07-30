@@ -778,24 +778,6 @@ void print_dbt_on_metadata_gstring(struct db_table *dbt, GString *data){
   gchar *lkey=build_dbt_key(dbt->database->database_name_in_filename, dbt->table_filename);
   g_string_append_printf(data,"\n[%s]\n", lkey);
   g_string_append_printf(data, "real_table_name=%s\nrows = %"G_GINT64_FORMAT"\n", table, dbt->rows);
-  g_string_append_printf(data, "data_files = %u\n", dbt->data_files);
-  if (!dbt->data_files_complete){
-    guint estimated = dbt->data_files;
-    if (dbt->estimated_remaining_steps > 0){
-      guint64 sum = (guint64)dbt->data_files + dbt->estimated_remaining_steps;
-      if (sum > estimated && sum <= G_MAXUINT)
-        estimated = (guint)sum;
-    }
-    if (dbt->rows > 0 && dbt->rows_total > 0){
-      guint64 extrap = (guint64)dbt->data_files * dbt->rows_total / dbt->rows;
-      if (extrap > estimated && extrap <= G_MAXUINT)
-        estimated = (guint)extrap;
-    }
-    if (estimated > dbt->data_files)
-      g_string_append_printf(data, "data_files_estimated = %u\n", estimated);
-  }
-  if (dbt->data_files_complete)
-    g_string_append(data, "data_files_complete = 1\n");
   g_free(name);
   g_free(lkey);
   g_free(table);

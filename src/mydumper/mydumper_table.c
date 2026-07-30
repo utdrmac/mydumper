@@ -546,34 +546,3 @@ gboolean new_db_table(struct db_table **d, MYSQL *conn, struct configuration *co
   *d=dbt;
   return b;
 }
-
-gboolean is_data_restore_filename(const gchar *filename){
-  if (filename == NULL || !g_str_has_suffix(filename, ".sql"))
-    return FALSE;
-  if (g_str_has_suffix(filename, "-schema.sql") ||
-      g_str_has_suffix(filename, "-schema-view.sql") ||
-      g_str_has_suffix(filename, "-schema-sequence.sql") ||
-      g_str_has_suffix(filename, "-schema-triggers.sql") ||
-      g_str_has_suffix(filename, "-schema-post.sql") ||
-      g_str_has_suffix(filename, "-schema-create.sql"))
-    return FALSE;
-  return TRUE;
-}
-
-void dbt_note_data_file_closed(struct db_table *dbt, const gchar *filename, guint64 size){
-  if (dbt == NULL || !is_data_restore_filename(filename))
-    return;
-  if (size == 0 && !build_empty_files)
-    return;
-  g_mutex_lock(dbt->chunks_mutex);
-  dbt->data_files++;
-  g_mutex_unlock(dbt->chunks_mutex);
-}
-
-void dbt_note_data_files_complete(struct db_table *dbt){
-  if (dbt == NULL || dbt->data_files_complete)
-    return;
-  g_mutex_lock(dbt->chunks_mutex);
-  dbt->data_files_complete = TRUE;
-  g_mutex_unlock(dbt->chunks_mutex);
-}

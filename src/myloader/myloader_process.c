@@ -827,26 +827,6 @@ void process_metadata_global_filename(gchar *file, GOptionContext * local_contex
           if (get_value(kf,groups[j],ROWS)){
             dbt->rows=g_ascii_strtoull(get_value(kf,groups[j],ROWS),NULL, 10);
           }
-          value=get_value(kf,groups[j],DATA_FILES);
-          if (value){
-            guint reported=g_ascii_strtoull(value,NULL, 10);
-            if (reported > dbt->data_files_reported)
-              dbt->data_files_reported=reported;
-            g_free(value);
-          }
-          value=get_value(kf,groups[j],DATA_FILES_ESTIMATED);
-          if (value){
-            guint estimated=g_ascii_strtoull(value,NULL, 10);
-            if (estimated > dbt->data_files_estimated_reported)
-              dbt->data_files_estimated_reported=estimated;
-            g_free(value);
-          }
-          value=get_value(kf,groups[j],DATA_FILES_COMPLETE);
-          if (value != NULL && g_strcmp0(value,"1")==0){
-            dbt->data_files_complete=TRUE;
-            if (dbt->data_files_reported > dbt->data_files_estimated_reported)
-              dbt->data_files_estimated_reported=dbt->data_files_reported;
-          }
           if (value) g_free(value);
         }
       } else {
