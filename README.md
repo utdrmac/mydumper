@@ -17,6 +17,7 @@ Both tools use multithreading capabilities.
 # Documentation
 [Official Documentation](https://mydumper.github.io/mydumper/) (work in progress)
 [Machine JSON Logging](./README-machine-log.md)
+[Binary Streaming](./README-streaming.md)
 
 ## How to install mydumper/myloader?
 
@@ -63,7 +64,7 @@ You can execute external commands with --exec like this:
  mydumper --exec "/usr/bin/gzip FILENAME"
 ```
 
---exec is single threaded, similar implementation than Stream. The exec program must be an absolute path. FILENAME will be replaced by the filename that you want to be processed. You can set FILENAME in any place as an argument.
+--exec is single threaded, similar implementation than Stream. The exec program must be an absolute path. FILENAME will be replaced by the filename that you want to be processed. You can set FILENAME in any place as an argument. For `--stream` (binary protocol, compression, and memory budgets), see [Binary Streaming](./README-streaming.md).
 
 ## Defaults file
 
