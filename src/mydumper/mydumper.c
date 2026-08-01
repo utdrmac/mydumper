@@ -68,8 +68,8 @@ extern gchar *string_pk_planner_strategy_str;
 extern guint string_pk_planner_timeout_seconds;
 extern guint string_pk_planner_max_probes;
 extern guint string_pk_planner_max_prefixes;
-extern guint string_pk_planner_max_depth;
 extern guint64 string_pk_planner_min_rows;
+extern guint64 string_pk_planner_target_rows_per_prefix;
 extern gchar *table_engine_for_view_dependency;
 extern gchar *load_data_character_set;
 extern guint ftwrl_timeout_retries;
@@ -135,12 +135,13 @@ void print_help(){
   print_int("string-pk-planner-timeout", string_pk_planner_timeout_seconds, FALSE);
   print_int("string-pk-planner-max-probes", string_pk_planner_max_probes, FALSE);
   print_int("string-pk-planner-max-prefixes", string_pk_planner_max_prefixes, FALSE);
-  print_int("string-pk-planner-max-depth", string_pk_planner_max_depth, FALSE);
 
   gchar *string_pk_planner_min_rows_str = g_strdup_printf("%"G_GUINT64_FORMAT, string_pk_planner_min_rows);
   print_string("string-pk-planner-min-rows", string_pk_planner_min_rows_str);
   g_free(string_pk_planner_min_rows_str);
-  
+  gchar *string_pk_planner_target_rows_per_prefix_str = g_strdup_printf("%"G_GUINT64_FORMAT, string_pk_planner_target_rows_per_prefix);
+  print_string("string-pk-planner-target-rows-per-prefix", string_pk_planner_target_rows_per_prefix_str);
+  g_free(string_pk_planner_target_rows_per_prefix_str);
   print_string("rows",g_strdup_printf("%"G_GUINT64_FORMAT":%"G_GUINT64_FORMAT":%"G_GUINT64_FORMAT,min_chunk_step_size, starting_chunk_step_size, max_chunk_step_size));
   print_string("rows-hard",g_strdup_printf("%"G_GUINT64_FORMAT":%"G_GUINT64_FORMAT,min_integer_chunk_step_size, max_integer_chunk_step_size));
   print_int("max-split-of-step-in-integer-chunk", max_split_of_step_in_integer_chunk, FALSE);
