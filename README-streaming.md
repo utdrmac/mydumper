@@ -174,9 +174,19 @@ This variable is ignored for streaming, and uses a single-threaded in-process `Z
 
 ## Memory budget subsystem
 
-On the `myloader` side, after the streaming protocol sends an entire file, it is kept in RAM (`stream_mem_files`) instead of writing to disk. Without a memory limit, a fast receive thread could queue far more data in memory than loader threads can process into MySQL. On the mydumper side, workers enqueue multiplexed `DATA` frames without waiting for a per-file ACK from myloader, so a separate budget on mydumper provides memory protection.
+There are two independent local memory "budgets"; one on mydumper, and one on myloader. The binary protocol has no ACK, in other words, there is no communication between the two programs.
 
-There are two independent local budgets; one on mydumper, and one on myloader. The binary protocol has no ACK, in other words, there is no communication between the two programs.
+### mydumper
+
+On the `mydumper` side, workers enqueue multiplexed `DATA` frames without waiting for a per-file ACK from myloader, therefore, a separate budget on mydumper provides memory protection. Mydumper writes the values of the parameters `chunk-filesize`, and `stream-budget-mb` to the initial metadata file sent to myloader.
+
+### myloader 
+
+On the `myloader` side, after the streaming protocol receives an entire file, it is kept in RAM (`stream_mem_files`) instead of writing to disk. Without a memory limit, a fast receive thread could queue far more data in memory than loader threads can process into MySQL. By default, myloader's memory budget is 512MB.
+
+Myloader calculates a recommended budget by comparing mydumper's budget / chunk size to the number of threads. If the budget on myloader is too small, a warning will be displayed, and the budget will be auto-size up. The user can override this behavior by setting an explicit `--stream-budget-mb` on myloader. A warning will still be displayed if there isn't enough budget to match the incoming stream.
+
+Example: mydumper chunk-size=100MB, stream-budget-mb=256MB. myloader threads=8, stream-budget-mb=128MB. Recommended myloader budget: (128 / 100) = 1.28. This is how many effective threads myloader can process. Since this is less than 8, a warning is displayed, and the myloader budget is auto-scaled up to (8 * 100MB) = 800MB
 
 ### How it works
 
