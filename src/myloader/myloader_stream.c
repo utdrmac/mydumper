@@ -537,6 +537,15 @@ struct loader_demux {
   GHashTable *streams; /* stream_id -> struct demux_file */
 };
 
+static gboolean stream_lenient_mode = FALSE;
+static gboolean stream_producer_cancelled = FALSE;
+
+static void stream_demux_set_lenient(const gchar *reason){
+  stream_lenient_mode = TRUE;
+  if (reason)
+    g_warning("%s", reason);
+}
+
 static void demux_on_open(void *user, guint64 sid, const gchar *name,
                           guint8 flags, guint8 codec){
   struct loader_demux *dx = user;
@@ -579,9 +588,15 @@ static void demux_inflate_append(struct demux_file *df, const gchar *buf,
       guchar out[STREAM_INFLATE_CHUNK];
       ZSTD_outBuffer o = {out, sizeof(out), 0};
       size_t ret = ZSTD_decompressStream(df->zds, &o, &in);
-      if (ZSTD_isError(ret))
+      if (ZSTD_isError(ret)){
+        if (stream_lenient_mode){
+          g_warning("Stream ended before %s finished; skipping partial file",
+                    df->name);
+          return;
+        }
         m_critical("Stream: zstd decompress failed for %s: %s", df->name,
                    ZSTD_getErrorName(ret));
+      }
       if (o.pos)
         g_string_append_len(df->data, (gchar *)out, o.pos);
       if (o.pos == 0 && in.pos == in.size)
@@ -597,8 +612,14 @@ static void demux_inflate_append(struct demux_file *df, const gchar *buf,
     df->zs->avail_out = sizeof(out);
     int ret = inflate(df->zs, Z_NO_FLUSH);
     if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR ||
-        ret == Z_NEED_DICT)
+        ret == Z_NEED_DICT){
+      if (stream_lenient_mode){
+        g_warning("Stream ended before %s finished; skipping partial file",
+                  df->name);
+        return;
+      }
       m_critical("Stream: inflate failed for %s (%d)", df->name, ret);
+    }
     gsize produced = sizeof(out) - df->zs->avail_out;
     if (produced)
       g_string_append_len(df->data, (gchar *)out, produced);
@@ -679,6 +700,14 @@ static void demux_on_close(void *user, guint64 sid, guint64 total,
   g_free(df);
 }
 
+static void demux_on_cancel(void *user){
+  (void)user;
+  stream_producer_cancelled = TRUE;
+  stream_lenient_mode = TRUE;
+  shutdown_triggered = TRUE;
+  g_message("Stream restore stopping: dump cancelled by producer");
+}
+
 static void demux_free_pending(gpointer p){
   struct demux_file *df = p;
   if (df->zs){
@@ -697,26 +726,50 @@ static void *process_binary_stream_loader(struct configuration *conf,
                                           gsize prefix_len){
   (void)conf;
   set_thread_name("STT");
+  stream_lenient_mode = FALSE;
+  stream_producer_cancelled = FALSE;
   struct loader_demux dx;
   dx.streams = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                      demux_free_pending);
   struct myd_stream_callbacks cb = {demux_on_open, demux_on_data,
-                                    demux_on_close, NULL};
+                                    demux_on_close, NULL, demux_on_cancel};
   struct myd_stream_decoder *d = myd_stream_decoder_new(&cb, &dx);
 
   if (prefix_len){
-    if (myd_stream_decoder_feed(d, prefix, prefix_len) == MYD_DECODE_ERROR)
+    int pr = myd_stream_decoder_feed(d, prefix, prefix_len);
+    if (pr == MYD_DECODE_ERROR && !stream_lenient_mode)
       m_critical("Corrupted binary stream header");
   }
 
   guchar *buf = g_malloc(STREAM_BUFFER_SIZE);
   size_t n;
+  gboolean stream_saw_eof = FALSE;
   while ((n = fread(buf, 1, STREAM_BUFFER_SIZE, stdin)) > 0){
-    if (myd_stream_decoder_feed(d, buf, n) == MYD_DECODE_ERROR)
+    if (shutdown_triggered && !stream_lenient_mode)
+      stream_demux_set_lenient(NULL);
+    int r = myd_stream_decoder_feed(d, buf, n);
+    if (r == MYD_DECODE_ERROR){
+      if (stream_lenient_mode || shutdown_triggered){
+        stream_demux_set_lenient(
+            "Stream ended with incomplete frame; discarding partial data");
+        break;
+      }
       m_critical("Corrupted binary stream");
-    if (myd_stream_decoder_saw_eof(d))
+    }
+    if (myd_stream_decoder_saw_eof(d)){
+      stream_saw_eof = TRUE;
       break;
+    }
   }
+  if (n == 0 && !stream_saw_eof){
+    stream_demux_set_lenient(NULL);
+    if (!stream_producer_cancelled)
+      g_warning("Stream producer disconnected unexpectedly");
+  }
+  if (g_hash_table_size(dx.streams) > 0 && stream_lenient_mode)
+    g_warning("Stream ended before %u file(s) finished; skipping partial "
+              "file(s)",
+              g_hash_table_size(dx.streams));
   g_free(buf);
   myd_stream_decoder_free(d);
   g_hash_table_destroy(dx.streams);

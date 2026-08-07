@@ -15,6 +15,8 @@
         Multiplexed binary stream protocol (see common_stream_protocol.h).
 */
 #include <string.h>
+#include <errno.h>
+#include <unistd.h>
 #include "common_stream_protocol.h"
 
 /* ---------- Encoding ---------- */
@@ -82,6 +84,30 @@ void myd_stream_encode_file_close(GString *out, guint64 stream_id,
 }
 
 void myd_stream_encode_eof(GString *out) { append_u8(out, MYD_FRAME_EOF); }
+
+void myd_stream_encode_cancel(GString *out) {
+  append_u8(out, MYD_FRAME_CANCEL);
+}
+
+gboolean myd_stream_write_all(int fd, const void *buf, gsize len,
+                              gboolean *consumer_gone) {
+  const char *p = buf;
+  gsize written = 0;
+  while (written < len) {
+    ssize_t r = write(fd, p + written, len - written);
+    if (r < 0) {
+      if (errno == EPIPE ||
+          errno == ECONNRESET) {
+        if (consumer_gone)
+          *consumer_gone = TRUE;
+        return FALSE;
+      }
+      return FALSE;
+    }
+    written += (gsize)r;
+  }
+  return TRUE;
+}
 
 /* ---------- Varint decode ---------- */
 
@@ -242,6 +268,12 @@ int myd_stream_decoder_feed(struct myd_stream_decoder *d, const guchar *buf,
         if (d->cb.on_eof)
           d->cb.on_eof(d->user);
         d->state = DS_DONE;
+        break;
+      }
+      if (d->cur_type == MYD_FRAME_CANCEL) {
+        if (d->cb.on_cancel)
+          d->cb.on_cancel(d->user);
+        d->state = DS_TYPE;
         break;
       }
       if (d->cur_type != MYD_FRAME_FILE_OPEN &&

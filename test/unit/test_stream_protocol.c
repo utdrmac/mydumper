@@ -29,6 +29,8 @@ struct rebuilt_file {
 struct collector {
   GHashTable *files; /* stream_id -> struct rebuilt_file */
   gboolean eof;
+  gboolean cancel;
+  gint cancel_before_eof;
 };
 
 static void on_open(void *user, guint64 sid, const gchar *name, guint8 flags,
@@ -65,6 +67,15 @@ static void on_close(void *user, guint64 sid, guint64 total, gboolean has_crc,
 static void on_eof(void *user) {
   struct collector *c = user;
   c->eof = TRUE;
+  if (c->cancel)
+    c->cancel_before_eof++;
+}
+
+static void on_cancel(void *user) {
+  struct collector *c = user;
+  c->cancel = TRUE;
+  if (c->eof)
+    c->cancel_before_eof--;
 }
 
 /* Build a representative stream: two interleaved files plus a large one. */
@@ -129,7 +140,7 @@ static void run_with_chunk(GString *stream, GString *big_payload,
   struct collector c = {0};
   c.files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                   free_file);
-  struct myd_stream_callbacks cb = {on_open, on_data, on_close, on_eof};
+  struct myd_stream_callbacks cb = {on_open, on_data, on_close, on_eof, NULL};
   struct myd_stream_decoder *d = myd_stream_decoder_new(&cb, &c);
 
   gsize off = 0;
@@ -166,7 +177,7 @@ static void test_not_binary(void) {
   struct collector c = {0};
   c.files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                   free_file);
-  struct myd_stream_callbacks cb = {on_open, on_data, on_close, on_eof};
+  struct myd_stream_callbacks cb = {on_open, on_data, on_close, on_eof, NULL};
   struct myd_stream_decoder *d = myd_stream_decoder_new(&cb, &c);
 
   const char *legacy = "\n-- db.table.00001.sql 42\nINSERT ...";
@@ -175,6 +186,30 @@ static void test_not_binary(void) {
 
   myd_stream_decoder_free(d);
   g_hash_table_destroy(c.files);
+}
+
+static void test_cancel_before_eof(void) {
+  GString *s = g_string_new("");
+  myd_stream_append_magic(s);
+  myd_stream_encode_cancel(s);
+  myd_stream_encode_eof(s);
+
+  struct collector c = {0};
+  c.files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
+                                  free_file);
+  struct myd_stream_callbacks cb = {on_open, on_data, on_close, on_eof,
+                                    on_cancel};
+  struct myd_stream_decoder *d = myd_stream_decoder_new(&cb, &c);
+
+  g_assert_cmpint(myd_stream_decoder_feed(d, (const guchar *)s->str, s->len),
+                  ==, MYD_DECODE_OK);
+  g_assert_true(c.cancel);
+  g_assert_true(c.eof);
+  g_assert_cmpint(c.cancel_before_eof, ==, 1);
+
+  myd_stream_decoder_free(d);
+  g_hash_table_destroy(c.files);
+  g_string_free(s, TRUE);
 }
 
 static void test_varint(void) {
@@ -225,7 +260,7 @@ static void test_compressed_roundtrip(void) {
   struct collector c = {0};
   c.files = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL,
                                   free_file);
-  struct myd_stream_callbacks cb = {on_open, on_data, on_close, on_eof};
+  struct myd_stream_callbacks cb = {on_open, on_data, on_close, on_eof, NULL};
   struct myd_stream_decoder *d = myd_stream_decoder_new(&cb, &c);
   /* Feed 3 bytes at a time to stress boundaries. */
   for (gsize off = 0; off < stream->len; off += 3){
@@ -376,6 +411,7 @@ static void test_zstd_codec(void) {
 
 int main(int argc, char **argv) {
   g_test_init(&argc, &argv, NULL);
+  g_test_add_func("/stream_protocol/cancel_before_eof", test_cancel_before_eof);
   g_test_add_func("/stream_protocol/varint", test_varint);
   g_test_add_func("/stream_protocol/roundtrip", test_roundtrip);
   g_test_add_func("/stream_protocol/not_binary", test_not_binary);

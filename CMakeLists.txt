@@ -160,6 +160,11 @@ target_include_directories(test_stream_protocol PRIVATE ${GLIB2_INCLUDE_DIR} ${Z
 target_link_libraries(test_stream_protocol ${GLIB2_LIBRARIES} ${ZLIB_LIBRARIES} ${ZSTD_LIBRARIES})
 add_test(NAME stream_protocol COMMAND test_stream_protocol)
 
+add_executable(test_stream_write test/unit/test_stream_write.c src/common_stream_protocol.c)
+target_include_directories(test_stream_write PRIVATE ${GLIB2_INCLUDE_DIR})
+target_link_libraries(test_stream_write ${GLIB2_LIBRARIES})
+add_test(NAME stream_write COMMAND test_stream_write)
+
 add_executable(test_stream_budget test/unit/test_stream_budget.c src/myloader/myloader_stream_mem_budget.c)
 target_include_directories(test_stream_budget PRIVATE ${GLIB2_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/src/myloader)
 target_compile_definitions(test_stream_budget PRIVATE STREAM_MEM_BUDGET_TEST)

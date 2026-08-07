@@ -355,6 +355,8 @@ gboolean sig_triggered(void * user_data, int signal) {
           }
           g_free(datetimestr);
           shutdown_triggered = TRUE;
+          if (stream && stream_use_binary)
+            stream_request_cancel();
           for(i=0;i<num_threads;i++)
             g_mutex_unlock(pause_mutex_per_thread[i]);
           goto finish;

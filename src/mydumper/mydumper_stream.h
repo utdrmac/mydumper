@@ -19,6 +19,7 @@
 void initialize_stream();
 void *process_binary_stream(void *data);
 void wait_stream_to_finish();
+void stream_request_cancel(void);
 void metadata_partial_queue_push(struct db_table *dbt);
 void stream_queue_push(struct db_table *dbt,gchar *filename);
 guint get_stream_queue_length();

@@ -27,6 +27,7 @@
 #endif
 // We need header fcntl.h for open function to build on Alpine. More info in: https://github.com/mydumper/mydumper/issues/1721
 #include <fcntl.h>
+#include <signal.h>
 
 #include "mydumper.h"
 #include "mydumper_global.h"
@@ -72,6 +73,8 @@ static GMutex *stream_out_files_mutex = NULL;
 static gint64 stream_budget_bytes = 0;
 static GMutex *stream_budget_mutex = NULL;
 static GCond *stream_budget_cond = NULL;
+
+static gboolean stream_stdout_closed = FALSE;
 
 struct stream_msg {
   guint8 type;         /* MYD_FRAME_* */
@@ -127,13 +130,11 @@ static gchar *stream_dup(const void *src, gsize len){
 }
 
 static void full_write_stdout(const char *buf, gsize len){
-  gsize written = 0;
-  while (written < len){
-    ssize_t r = write(fileno(stdout), buf + written, len - written);
-    if (r < 0)
-      m_error("Stream failed while writing to stdout: %s", strerror(errno));
-    written += (gsize)r;
-  }
+  if (stream_stdout_closed || len == 0)
+    return;
+  if (!myd_stream_write_all(fileno(stdout), buf, len, &stream_stdout_closed) &&
+      !stream_stdout_closed)
+    m_error("Stream failed while writing to stdout: %s", strerror(errno));
 }
 
 /* Copy a file descriptor to stdout. On Linux this uses sendfile() for a
@@ -429,12 +430,25 @@ void *process_binary_stream(void *data){
 
   for (;;){
     struct stream_msg *m = g_async_queue_pop(stream_msg_queue);
+    if (stream_stdout_closed){
+      g_free(m->filename);
+      g_free(m->data);
+      g_free(m);
+      break;
+    }
     if (m->type == MYD_FRAME_EOF){
       g_string_set_size(out, 0);
       myd_stream_encode_eof(out);
       full_write_stdout(out->str, out->len);
       g_free(m);
       break;
+    }
+    if (m->type == MYD_FRAME_CANCEL){
+      g_string_set_size(out, 0);
+      myd_stream_encode_cancel(out);
+      full_write_stdout(out->str, out->len);
+      g_free(m);
+      continue;
     }
     g_string_set_size(out, 0);
     switch (m->type){
@@ -464,6 +478,8 @@ void *process_binary_stream(void *data){
   }
 
   g_string_free(out, TRUE);
+  if (stream_stdout_closed)
+    g_warning("Stream consumer disconnected; stopping dump");
   GTimeSpan total_diff =
       (g_get_monotonic_time() - total_start_time) / G_TIME_SPAN_SECOND;
   g_message("All data transferred was %" G_GUINT64_FORMAT
@@ -472,6 +488,17 @@ void *process_binary_stream(void *data){
             total_diff != 0 ? (gint64)(total_size / 1024 / 1024 / total_diff)
                             : (gint64)(total_size / 1024 / 1024));
   return NULL;
+}
+
+void stream_request_cancel(void){
+  if (!stream_use_binary || !stream_msg_queue)
+    return;
+  struct stream_msg *mc = g_new0(struct stream_msg, 1);
+  mc->type = MYD_FRAME_CANCEL;
+  stream_msg_push(mc);
+  struct stream_msg *me = g_new0(struct stream_msg, 1);
+  me->type = MYD_FRAME_EOF;
+  stream_msg_push(me);
 }
 
 void metadata_partial_queue_push (struct db_table *dbt){
@@ -689,6 +716,7 @@ void initialize_stream(){
       stream_budget_cap = (guint64)stream_budget_mb * 1024 * 1024;
     else
       stream_budget_cap = (guint64)MYDUMPER_STREAM_BUDGET_DEFAULT_MB * 1024 * 1024;
+    signal(SIGPIPE, SIG_IGN);
     /* --compress enables in-process (zlib) compression of the stream,
        self-describing via the per-file COMPRESSED flag so the loader handles it
        automatically. The specific codec (GZIP/ZSTD) only affects on-disk files;

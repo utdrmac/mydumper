@@ -21,6 +21,7 @@
 #include <glib/gstdio.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include <glib-unix.h>
 
 #include "myloader.h"
@@ -642,6 +643,7 @@ gboolean sig_triggered(void * user_data, int signal) {
   struct configuration *conf=(struct configuration *)user_data;
   guint i=0;
   GAsyncQueue *queue=NULL;
+  FILE *tty = NULL;
   g_mutex_lock(shutdown_triggered_mutex);
   if (signal == SIGTERM){
     shutdown_triggered = TRUE;
@@ -655,9 +657,11 @@ gboolean sig_triggered(void * user_data, int signal) {
     if (conf->pause_resume == NULL)
       conf->pause_resume = g_async_queue_new();
     queue = conf->pause_resume;
-    for(i=0;i<num_threads;i++){
-      g_mutex_lock(pause_mutex_per_thread[i]);
-      g_async_queue_push(queue,pause_mutex_per_thread[i]);
+    if (!stream){
+      for(i=0;i<num_threads;i++){
+        g_mutex_lock(pause_mutex_per_thread[i]);
+        g_async_queue_push(queue,pause_mutex_per_thread[i]);
+      }
     }
     if (machine_log_json) {
       machine_log_event(G_LOG_DOMAIN, G_LOG_LEVEL_WARNING,
@@ -668,46 +672,68 @@ gboolean sig_triggered(void * user_data, int signal) {
                        NULL);
     } else {
       fprintf(stdout, "Ctrl+c detected! Are you sure you want to cancel(Y/N)?");
+      fflush(stdout);
     }
-    int c=0;
-    while (1){
-      do{
-        c=fgetc(stdin);
-      }while (c=='\n');
-      if ( c == 'N' || c == 'n'){
-        for(i=0;i<num_threads;i++)
-          g_mutex_unlock(pause_mutex_per_thread[i]);
-        g_mutex_unlock(shutdown_triggered_mutex);
-        return TRUE;
-      }
-      if ( c == 'Y' || c == 'y'){
-        shutdown_triggered = TRUE;
-        for(i=0;i<num_threads;i++)
-          g_mutex_unlock(pause_mutex_per_thread[i]);
-        break;
+    if (stream)
+      tty = fopen("/dev/tty", "r");
+    if (stream && (!tty || !isatty(fileno(tty)))){
+      shutdown_triggered = TRUE;
+    }else{
+      int c=0;
+      while (1){
+        do{
+          if (stream)
+            c=fgetc(tty);
+          else
+            c=fgetc(stdin);
+        }while (c=='\n');
+        if ( c == 'N' || c == 'n'){
+          if (!stream){
+            for(i=0;i<num_threads;i++)
+              g_mutex_unlock(pause_mutex_per_thread[i]);
+          }
+          g_mutex_unlock(shutdown_triggered_mutex);
+          if (tty)
+            fclose(tty);
+          return TRUE;
+        }
+        if ( c == 'Y' || c == 'y'){
+          shutdown_triggered = TRUE;
+          if (!stream){
+            for(i=0;i<num_threads;i++)
+              g_mutex_unlock(pause_mutex_per_thread[i]);
+          }
+          break;
+        }
       }
     }
+    if (tty)
+      fclose(tty);
   }
   inform_restore_job_running();
   create_index_shutdown_job();
   restore_job_finish();
-  message("Writing resume.partial file");
-  gchar *filename;
-  gchar *p=g_strdup("resume.partial"),*p2=g_strdup("resume");
+  if (!stream){
+    message("Writing resume.partial file");
+    gchar *filename;
+    gchar *p=g_strdup("resume.partial"),*p2=g_strdup("resume");
 
-  void *outfile = g_fopen(p, "w");
-  filename = g_async_queue_pop(file_list_to_do);
-  while(g_strcmp0(filename,"NO_MORE_FILES")!=0){
-    g_debug("Adding %s to resume file", filename);
-    fprintf(outfile, "%s\n", filename);
-    filename=g_async_queue_pop(file_list_to_do);
+    void *outfile = g_fopen(p, "w");
+    filename = g_async_queue_pop(file_list_to_do);
+    while(g_strcmp0(filename,"NO_MORE_FILES")!=0){
+      g_debug("Adding %s to resume file", filename);
+      fprintf(outfile, "%s\n", filename);
+      filename=g_async_queue_pop(file_list_to_do);
+    }
+    fclose(outfile);
+    if (g_rename(p, p2) != 0){
+      g_critical("Error renaming resume.partial to resume");
+    }
+    g_free(p);
+    g_free(p2);
+  }else{
+    g_message("Stream restore cancelled; restart requires a new dump stream");
   }
-  fclose(outfile);
-  if (g_rename(p, p2) != 0){
-    g_critical("Error renaming resume.partial to resume");
-  }
-  g_free(p);
-  g_free(p2);
   message("Shutting down gracefully completed.");
   g_mutex_unlock(shutdown_triggered_mutex);
   return FALSE;

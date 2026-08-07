@@ -69,7 +69,7 @@ Several `stream_id`s may be interleaved: OPEN for A, DATA for B, DATA for A, CLO
 
 ### Frame types
 
-In the table below, you can see the 4 different frame types, their names, and the data contained in each frame's payload.
+In the table below, you can see the frame types, their names, and the data contained in each frame's payload.
 
 
 | Value | Name         | Payload                                                                   |
@@ -78,6 +78,7 @@ In the table below, you can see the 4 different frame types, their names, and th
 | 2     | `DATA`       | varint `stream_id`, varint `length`, `length` raw bytes                   |
 | 3     | `FILE_CLOSE` | varint `stream_id`, varint `total_size`, `u8` flags, optional CRC32       |
 | 4     | `EOF`        | no payload (end of entire stream)                                         |
+| 5     | `CANCEL`     | no payload (dump user-cancel; normally followed by `EOF`)                 |
 
 
 
@@ -147,7 +148,45 @@ sequenceDiagram
 4. **Decode.** myloader peeks for `MYDSTRM2`, then `process_binary_stream_loader` feeds stdin into `myd_stream_decoder`. Callbacks `demux_on_open` / `demux_on_data` / `demux_on_close` rebuild each file (decompressing when the flags say so).
 5. **Restore.** Completed data files land in `stream_mem_files`. Loaders take them with `stream_mem_get` and restore via `fmemopen` (`myl_open`) or the LOCAL INFILE handler. Names starting with `metadata` are written under the work directory for GKeyFile parsing.
 
-Shutdown ends with a `MYD_FRAME_EOF` message so myloader knows the stream is complete.
+Shutdown ends with a `MYD_FRAME_EOF` message so myloader knows the stream is complete. If the dump is cancelled with Ctrl+C on the mydumper host, mydumper sends `MYD_FRAME_CANCEL` followed by `MYD_FRAME_EOF` so myloader can stop without a separate Ctrl+C on the restore host.
+
+## Interrupting a stream (Ctrl+C)
+
+Streaming works locally (`mydumper --stream | myloader --stream`) and remotely (often via `socat` over TCP). **myloader stdin is always the byte stream**, never the terminal — confirmation prompts must not read from stdin in `--stream` mode.
+
+### Local pipe
+
+```bash
+mydumper --stream ... | myloader --stream ...
+```
+
+Both processes may receive SIGINT from the same terminal session. Each program handles Ctrl+C on its own host.
+
+### Remote socat
+
+```bash
+# Dump host
+mydumper --stream ... | socat - TCP:restore-host:9200
+
+# Restore host
+socat TCP-LISTEN:9200,reuseaddr,fork - | myloader --stream ...
+```
+
+Ctrl+C affects only the terminal where it was pressed.
+
+### Dump host cancel (partial coordination)
+
+When you confirm cancel on **mydumper**, it sends **`MYD_FRAME_CANCEL`** then **`MYD_FRAME_EOF`** on the stream. **myloader** sets shutdown, discards in-flight partial files leniently, drains restore workers, and exits — no restore-side Ctrl+C required. Requires matching mydumper/myloader versions.
+
+### Restore host cancel
+
+When you confirm cancel on **myloader**, the prompt uses **`/dev/tty`** (not stdin). myloader shuts down cleanly and does **not** write a `resume` file (resume is directory-restore only). The dump side eventually sees a broken pipe / disconnect and exits with a warning, not a fatal error.
+
+Use **`myloader --kill-at-once`** to skip the Y/N confirmation on the restore host.
+
+### Abrupt disconnect
+
+If socat or the network fails mid-stream (no `CANCEL` / `EOF` frame), myloader treats truncated frames as a producer disconnect (warnings, no core dump). mydumper treats a closed consumer as **`Stream consumer disconnected; stopping dump`**.
 
 ## Compression
 

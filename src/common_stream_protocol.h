@@ -37,6 +37,7 @@
       FILE_CLOSE: varint stream_id, varint total_size,
                   1 byte flags, [4 bytes crc32 if MYD_FCLOSE_FLAG_CRC32]
       EOF       : (no payload)
+      CANCEL    : (no payload; producer user-cancel; normally followed by EOF)
 
     When flags has MYD_FOPEN_FLAG_COMPRESSED, the DATA payloads for that file
     are compressed with the algorithm named by the codec byte (see enum
@@ -59,7 +60,8 @@ enum myd_frame_type {
   MYD_FRAME_FILE_OPEN  = 1,
   MYD_FRAME_DATA       = 2,
   MYD_FRAME_FILE_CLOSE = 3,
-  MYD_FRAME_EOF        = 4
+  MYD_FRAME_EOF        = 4,
+  MYD_FRAME_CANCEL     = 5
 };
 
 /* FILE_OPEN flags */
@@ -97,6 +99,12 @@ void myd_stream_encode_file_close(GString *out, guint64 stream_id,
                                   guint64 total_size, gboolean has_crc,
                                   guint32 crc);
 void myd_stream_encode_eof(GString *out);
+void myd_stream_encode_cancel(GString *out);
+
+/* Write all bytes to fd. On EPIPE/ECONNRESET sets *consumer_gone (if non-NULL)
+   and returns FALSE without aborting. Other errors still return FALSE. */
+gboolean myd_stream_write_all(int fd, const void *buf, gsize len,
+                              gboolean *consumer_gone);
 
 /* Read a varint from buf[*pos..len). On success advances *pos and returns
    TRUE; returns FALSE if the buffer does not (yet) contain a full varint. */
@@ -111,6 +119,7 @@ struct myd_stream_callbacks {
   void (*on_file_close)(void *user, guint64 stream_id, guint64 total_size,
                         gboolean has_crc, guint32 crc);
   void (*on_eof)(void *user);
+  void (*on_cancel)(void *user);
 };
 
 enum myd_decode_result {
